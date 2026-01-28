@@ -18,7 +18,7 @@ except:
 
 # 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기", layout="wide")
-st.title("🤖 AI 주식 투자 전략가 (Ranking Polish Ver.)")
+st.title("🤖 AI 주식 투자 전략가 (Final Polish Ver.)")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -29,6 +29,14 @@ if "current_news_data" not in st.session_state:
     st.session_state.current_news_data = [] 
 if "current_market_fact" not in st.session_state:
     st.session_state.current_market_fact = ""
+
+# --- [핵심 수정] 안전 필터 설정 (전역 변수로 확실하게 선언) ---
+safety_settings = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
 
 # --- [모델 목록] ---
 @st.cache_data
@@ -73,7 +81,7 @@ def fetch_google_news_rss(keyword, limit=30):
         print(f"RSS Error: {e}")
     return news_data
 
-# --- [데이터 수집 1: 테마 상위 50개 (왕관 추가)] ---
+# --- [데이터 수집 1: 테마 상위 50개] ---
 @st.cache_data
 def get_top_50_themes_stocks():
     url = "https://finance.naver.com/sise/theme.naver"
@@ -109,12 +117,11 @@ def get_top_50_themes_stocks():
                         code = code_match.group(1) if code_match else ""
                         price_str = cols[2].text.strip() + " (" + cols[4].text.strip().replace('\n', '').strip() + ")"
                         
-                        # [UI 수정] 1등에게 왕관 수여
                         rank_display = f"👑 {inner_rank}위" if inner_rank == 1 else f"{inner_rank}위"
                         
                         all_theme_stocks.append({
                             "code": code, "종목명": stock_name, "테마명": theme['name'],
-                            "테마순위": f"{idx+1}위", "테마순위_int": idx+1, # 정렬용 숫자
+                            "테마순위": f"{idx+1}위", "테마순위_int": idx+1,
                             "테마내순위": rank_display,
                             "현재가(등락률)": price_str
                         })
@@ -125,11 +132,13 @@ def get_top_50_themes_stocks():
     except: pass
     return pd.DataFrame(all_theme_stocks)
 
-# --- [데이터 수집 2: 상승률 상위] ---
+# --- [데이터 수집 2: 상승률 상위 (시장 정보 포함)] ---
+# [수정] 코드만 가져오는게 아니라, {코드: 시장구분} 딕셔너리로 반환
 @st.cache_data
-def get_risers_codes():
-    riser_codes = set()
-    for s in [0, 1]: 
+def get_risers_data_with_market():
+    riser_map = {} # Key: Code, Value: Market Name
+    # 0: 코스피, 1: 코스닥
+    for s, market_name in [(0, "KOSPI"), (1, "KOSDAQ")]:
         try:
             res = requests.get(f"https://finance.naver.com/sise/sise_rise.naver?sosok={s}", headers={'User-Agent': 'Mozilla/5.0'})
             soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
@@ -139,10 +148,11 @@ def get_risers_codes():
                 link = item['href']
                 code_match = re.search(r'code=([0-9]+)', link)
                 if code_match:
-                    riser_codes.add(code_match.group(1))
+                    code = code_match.group(1)
+                    riser_map[code] = market_name # 시장 정보 저장
                     count += 1
         except: pass
-    return riser_codes
+    return riser_map
 
 @st.cache_data
 def get_top_gainers_df(limit=150):
@@ -274,6 +284,7 @@ def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, mark
     
     model = genai.GenerativeModel(f"models/{model_name}")
     try:
+        # [핵심] safety_settings 전달
         response = model.generate_content(modified_msgs, stream=True, safety_settings=safety_settings)
         for chunk in response:
             try:
@@ -323,6 +334,7 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
     """
     
     try:
+        # [핵심] safety_settings 전달
         response = model.generate_content(prompt, stream=True, safety_settings=safety_settings)
         for chunk in response:
             try:
@@ -352,7 +364,7 @@ with st.sidebar:
 # 초기 데이터 로딩
 with st.status("🚀 3중 필터(테마/상승/거래대금) 데이터 수집 중...", expanded=True) as status:
     df_themes = get_top_50_themes_stocks() 
-    riser_codes = get_risers_codes()       
+    riser_data = get_risers_data_with_market() # [변경] 코드:시장구분 맵
     mf_codes = get_money_flow_codes()
     df_market_cap = get_market_cap_top150()
     df_kospi_gainers, df_kosdaq_gainers = get_top_gainers_df(limit=150)
@@ -373,7 +385,7 @@ with tab1:
     st.info(f"📊 **데이터 수집 현황**")
     col1, col2, col3 = st.columns(3)
     col1.metric("🔥 테마 종목", f"{len(df_themes)}개")
-    col2.metric("📈 상승 종목", f"{len(riser_codes)}개")
+    col2.metric("📈 상승 종목", f"{len(riser_data)}개")
     col3.metric("💰 거래대금 종목", f"{len(mf_codes)}개")
     
     final_candidates = []
@@ -381,24 +393,33 @@ with tab1:
     if not df_themes.empty:
         for index, row in df_themes.iterrows():
             code = row['code']
-            if (code in riser_codes) and (code in mf_codes):
-                final_candidates.append(row.to_dict())
+            # 교집합 검사
+            if (code in riser_data) and (code in mf_codes):
+                # 시장 구분 추가
+                row_data = row.to_dict()
+                row_data['시장'] = riser_data[code] # KOSPI or KOSDAQ
+                final_candidates.append(row_data)
                 
     if final_candidates:
         df_final = pd.DataFrame(final_candidates)
         df_final = df_final.drop_duplicates(['code'])
-        # [수정] 테마 순위(숫자)로 정렬
         df_final = df_final.sort_values(by="테마순위_int")
         
+        # [UI 수정] 컬럼 순서 및 구성 변경
+        # 순서: 테마순위 -> 테마내순위 -> 시장 -> 종목명 -> 현재가 -> 테마명
         event = st.dataframe(
-            df_final[['테마순위', '테마내순위', '종목명', '현재가(등락률)', '테마명']], 
+            df_final[['테마순위', '테마내순위', '시장', '종목명', '현재가(등락률)', '테마명']], 
             use_container_width=True, 
             hide_index=True, 
             on_select="rerun", 
             selection_mode="single-row",
             column_config={
-                "테마순위": st.column_config.TextColumn("테마 랭킹", width="small"),
-                "테마내순위": st.column_config.TextColumn("테마내 등수", width="small")
+                "테마순위": st.column_config.TextColumn("테마랭킹", width="small"),
+                "테마내순위": st.column_config.TextColumn("테마내등수", width="small"),
+                "시장": st.column_config.TextColumn("시장", width="small"),
+                "종목명": st.column_config.TextColumn("종목명", width="medium"),
+                "현재가(등락률)": st.column_config.TextColumn("현재가", width="medium"),
+                "테마명": st.column_config.TextColumn("테마명", width="medium"),
             }
         )
         
@@ -431,28 +452,22 @@ with tab1:
             st.info(f"💰 시가총액: **{get_stock_fundamentals(code)['시가총액']}** | 🏆 테마: **{s_theme}**")
             
             with st.expander("💬 AI 투자 전략가와 대화하기 (Click)", expanded=True):
-                # 뉴스 수집 상태
                 news_count = len(st.session_state.current_news_data)
                 if news_count > 0:
                     st.success(f"✅ **뉴스 {news_count}건 확보됨.**")
                 else:
                     st.warning("⚠️ 뉴스 없음.")
 
-                # [수정] 대화 기록 먼저 출력 (중복 방지)
                 for msg in st.session_state.messages:
                     if msg['role'] == 'user' and "당신은" in msg['content']: continue
                     with st.chat_message(msg['role']): st.markdown(msg['content'])
 
-                # [수정] 분석 버튼 로직 개선
-                if not st.session_state.messages: # 대화가 없을 때만 버튼 표시
+                if not st.session_state.messages:
                     if st.button(f"⚡ '{s_name}' 심층 분석 리포트 생성"):
                         user_msg_content = f"{s_name} 심층 분석해줘."
-                        # 1. 유저 메시지 UI 출력
                         with st.chat_message("user"): st.markdown(user_msg_content)
-                        # 2. 유저 메시지 저장
                         st.session_state.messages.append({"role": "user", "content": user_msg_content})
                         
-                        # 3. AI 답변 생성 및 스트리밍
                         with st.chat_message("assistant"):
                             res_txt = st.write_stream(get_gemini_response_stock_deep(
                                 st.session_state.messages, 
@@ -462,10 +477,8 @@ with tab1:
                                 st.session_state.current_market_fact, 
                                 st.session_state.current_news_data
                             ))
-                        # 4. AI 답변 저장
                         st.session_state.messages.append({"role": "assistant", "content": res_txt})
 
-                # 채팅창 입력 처리
                 if prompt := st.chat_input(f"{s_name} 질문..."):
                     with st.chat_message("user"): st.markdown(prompt)
                     st.session_state.messages.append({"role": "user", "content": prompt})
