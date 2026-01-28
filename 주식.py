@@ -252,7 +252,7 @@ def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, mark
     
     sys_instructions = """
     [Role]
-    당신은 세계최고 주식 애널리스트 겸 분석가 입니다.
+    당신은 국내 최고를 넘어서 세계최고의 주식 애널리스트 겸 분석가 입니다.
     그러나 말투는 디시인사이드 말투를 쓰는 젊은 애널리스트인거죠. 유쾌하고 재밌습니다.
     제공된 [정량 데이터]와 [뉴스 데이터]를 기반으로 해당 주식 종목을 분석하고 사용자의 질문에 답변하십시오.
     
@@ -308,7 +308,8 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
         combined_news += f"[{item['source']}] {item['title']}\n(요약): {item['summary']}\n\n"
     
     prompt = f"""
-    당신은 거시경제와 시장 흐름을 읽는 국내 최고 '마켓스트래티지스트겸 애널리스트 입니다.
+    당신은 국내최고를 넘어서 세계최고의 거시경제와 시장 흐름을 읽는 국내 최고 '마켓스트래티지스트겸 애널리스트 입니다.
+    그러나 말투는 디시인사이드 말투를 쓰는 젊은 애널리스트인거죠. 유쾌하고 재밌습니다.
     긴말하지말고 바로 분석에 들어가 주세요.
     
     [입력 데이터]
@@ -318,20 +319,21 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
     
     [분석 요구사항]
     위 데이터를 종합하여 '대형주(지수)'와 '개별 급등주(테마)'의 괴리를 분석하고,
-    오늘 시장의 **'진짜 주도 흐름'**을 명확히 정의해 주세요.
+    오늘 시장의 '진짜 주도 흐름'을 명확히 정의해 주세요.
     
     ### 1. 🌍 오늘의 시장 세줄 요약 (Market Color)
     * (예: "지수는 보합이나 2차전지와 AI 로봇 테마가 폭발하는 종목 장세")
     
     ### 2. 💰 자금 흐름 추적 (Money Flow)
-    * **대형주:** 반도체, 바이오, 금융 등 시총 상위 섹터의 수급은 어떻습니까?
-    * **개별주:** 급등주 리스트에서 공통적으로 보이는 **'오늘의 강세 테마'**는 무엇입니까?
+    * **대형주:** 반도체, 바이오, 금융 등 시총 상위 섹터의 수급은 어떻고 어떤 섹터가 주도하는 장세입니까?
+    * **개별주:** 급등주 리스트를 분석하고 '오늘의 강세 테마'를 파악하고 분석할 수 있습니까?
     
     ### 3. 📈 주요 거시 요인 분석
     * 환율, 금리, 미 증시 영향, 정부 정책 등이 오늘 시장에 미친 영향.
     
-    ### 4. 💼 투자자 대응 가이드
-    * 오늘 같은 장세에서는 **어떤 스타일의 투자**가 유리합니까? (돌파 매매 vs 눌림목 매수 vs 현금 확보)
+    ### 4. 💼 투자자 대응 가이드 및 세줄 요약
+    * 오늘 같은 장세에서는 *어떤 스타일의 투자*가 유리합니까? (돌파 매매 vs 눌림목 매수 vs 현금 확보)
+    금일 시황에 대해 세줄 요약해주세요.
     """
     
     try:
@@ -465,7 +467,7 @@ with tab1:
 
                 if not st.session_state.messages:
                     if st.button(f"⚡ '{s_name}' 심층 분석 리포트 생성"):
-                        user_msg_content = f"{s_name} 심층 분석해줘."
+                        user_msg_content = f"{s_name} 해당 주식 종목 분석해줘."
                         with st.chat_message("user"): st.markdown(user_msg_content)
                         st.session_state.messages.append({"role": "user", "content": user_msg_content})
                         
@@ -546,4 +548,5 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
