@@ -18,7 +18,7 @@ except:
 
 # 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기", layout="wide")
-st.title("🤖 AI 주식 투자 전략가2")
+st.title("🤖 AI 주식 투자 전략가3")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -80,7 +80,6 @@ def get_top_50_themes_stocks():
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
         soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
         
-        # 테마 상위 50개 링크 수집
         theme_links = []
         for row in soup.select("#contentarea_left > table.type_1 > tr"):
             cols = row.select("td")
@@ -90,7 +89,6 @@ def get_top_50_themes_stocks():
                 theme_links.append({"name": theme_name, "link": link})
                 if len(theme_links) >= 50: break
         
-        # 각 테마별 종목 수집
         progress_bar = st.progress(0)
         for idx, theme in enumerate(theme_links):
             try:
@@ -124,7 +122,7 @@ def get_top_50_themes_stocks():
     except: pass
     return pd.DataFrame(all_theme_stocks)
 
-# --- [데이터 수집 2: 상승률 상위 종목 (코드 추출)] ---
+# --- [데이터 수집 2: 상승률 상위 종목] ---
 @st.cache_data
 def get_risers_codes():
     riser_codes = set()
@@ -135,7 +133,7 @@ def get_risers_codes():
             
             count = 0
             for item in soup.select("table.type_2 tr td a.tltle"):
-                if count >= 500: break # 500개 제한
+                if count >= 500: break
                 link = item['href']
                 code_match = re.search(r'code=([0-9]+)', link)
                 if code_match:
@@ -144,7 +142,7 @@ def get_risers_codes():
         except: pass
     return riser_codes
 
-# --- [데이터 수집 3: 거래량 상위 종목 (코드 추출)] ---
+# --- [데이터 수집 3: 거래량 상위 종목] ---
 @st.cache_data
 def get_volume_codes():
     volume_codes = set()
@@ -155,7 +153,7 @@ def get_volume_codes():
             
             count = 0
             for item in soup.select("table.type_2 tr td a.tltle"):
-                if count >= 500: break # 500개 제한
+                if count >= 500: break
                 link = item['href']
                 code_match = re.search(r'code=([0-9]+)', link)
                 if code_match:
@@ -197,8 +195,8 @@ def get_market_cap_top150():
         except: pass
     return pd.DataFrame(stocks)
 
-# --- [AI 응답 함수] ---
-def get_gemini_response_intersection(messages, model_name, stock_name, theme, market_data_str, news_data):
+# --- [AI 응답 함수 1: 개별 종목 심층 분석] ---
+def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, market_data_str, news_data):
     genai.configure(api_key=GOOG_API_KEY)
     
     current_query = messages[-1]['content']
@@ -210,13 +208,41 @@ def get_gemini_response_intersection(messages, model_name, stock_name, theme, ma
             combined_news_context += f"[{i+1}. {item['source']}] {item['title']} ({item['date']})\n> 요약: {item['summary']}\n\n"
             
         search_res = f"""
-        \n[시스템 데이터 주입]
-        1. 📊 시장 데이터 (팩트):
+        \n[분석 대상 데이터]
+        1. 📊 정량적 데이터 (Market Fact):
         {market_data_str}
         
-        2. 📰 뉴스 대량 요약 데이터 (총 {len(news_data)}건):
+        2. 📰 정성적 데이터 (News Buzz - 총 {len(news_data)}건):
         {combined_news_context}
         """
+        
+        # [핵심] 프롬프트 고도화: 34세 직장인 타겟, 구체적 판단 요구
+        sys_instructions = """
+        당신은 냉철한 판단력을 가진 세게최고 주식 애널리스트 겸 분석가 입니다.
+        
+        제공된 [정량 데이터]와 [뉴스 데이터]를 교차 검증하여 다음 구조로 분석 리포트를 작성하세요.
+
+        긴말하지말고 바로 분석에 들어가 주세요.
+        
+        ### 1. 🎯 AI 투자 매력도 점수 (100점 만점)
+        * **점수:** OOO점
+        * **한줄 평:** (예: "강력한 호재와 수급이 만난 상승 초입 구간입니다" 또는 "재료 소멸 가능성이 있으니 주의하세요")
+        
+        ### 2. 🚀 핵심 상승 동력 (Momentum & Catalyst) 및 호재분석
+        * 뉴스에서 반복적으로 언급되는 **'진짜 호재(Fact)'** 3가지를 팩트 위주로 요약하세요.(뉴스를 언급할 필요는 없습니다. 주제파악만 하세요)
+        * 단순 기대감인지, 실질적인 수주/실적/정책 수혜인지 명확히 구분하세요.
+        
+        ### 3. ⚠️ 리스크 및 수급 점검
+        * 주가가 급등했다면 과열 여부는 없는지, 악재(CB발행, 대주주 매도 등)가 숨어있는지 체크하세요.
+        * 테마 내에서 이 종목이 '대장주'인지 '후발주자'인지 판단하세요.
+        
+        ### 4. 💡 실전 매매 전략 및 세줄요약
+        * **포지션:** [적극 매수 / 눌림목 매수 / 관망 / 매도] 등 전략 제시
+        * **전략:** 현실적인 가이드를 제시하세요. (예: "장중 대응 힘드니 시초가 이하 분할 매수")
+        """
+        
+        # 프롬프트를 메시지 맨 뒤에 붙이는 대신, 시스템 메시지처럼 결합
+        search_res += f"\n\n[System Instructions]\n{sys_instructions}"
     
     modified_msgs = []
     for i, msg in enumerate(messages):
@@ -231,7 +257,8 @@ def get_gemini_response_intersection(messages, model_name, stock_name, theme, ma
     except Exception as e:
         yield f"⚠️ API 오류: {str(e)}"
 
-def analyze_market_summary(df, news_data, model_name):
+# --- [AI 응답 함수 2: 시황 및 장세 분석] ---
+def analyze_market_macro(df, news_data, model_name):
     genai.configure(api_key=GOOG_API_KEY)
     model = genai.GenerativeModel(f"models/{model_name}")
     top_30 = df.head(30).to_string(index=False)
@@ -241,12 +268,35 @@ def analyze_market_summary(df, news_data, model_name):
         combined_text += f"[{item['source']}] {item['title']}\n(요약): {item['summary']}\n\n"
     
     prompt = f"""
-    당신은 수석 애널리스트입니다.
-    [시총 상위 30위 흐름]: {top_30}
-    [최신 뉴스 요약 데이터 ({len(news_data)}건)]: {combined_text}
+    당신은 거시경제와 시장 흐름을 읽는 국내 최고 '마켓스트래티지스트겸 애널리스트 입니다
+
+    긴말하지말고 바로 분석에 들어가 주세요
     
-    위 데이터를 종합하여 현재 시장 상황과 34세 직장인을 위한 대응 전략을 제시하세요.
+    [입력 데이터]
+    1. **Market Flow:** 코스피/코스닥 시총 상위 150위 종목의 현재 등락 현황
+    {top_150}
+    
+    2. **News Flow:** 시장 주요 뉴스 및 특징주 요약 ({len(news_data)}건)
+    {combined_text}
+    
+    [분석 요구사항]
+    위 데이터를 바탕으로 **오늘 한국 증시의 '성격'과 '주도 흐름'**을 명확히 정의해 주세요.
+    
+    ### 1. 🌍 오늘의 시장 세줄 요약 (Market Color)
+    * (예: "반도체가 끌고 2차전지가 미는 기술주 중심의 상승장")
+    
+    ### 2. 💰 자금 흐름 추적 (Money Flow)
+    * 시총 상위주들의 움직임을 볼 때, 자금이 **어떤 섹터(반도체, 바이오, 금융 등)**로 쏠리고 있습니까?
+    * 반대로 소외받거나 하락하는 섹터는 어디입니까?
+    
+    ### 3. 📈 주요 거시 요인 분석
+    * 뉴스에 언급된 환율, 금리, 미 증시 영향, 정부 정책 등이 오늘 시장에 어떤 영향을 미치고 있습니까?
+    
+    ### 4. 💼 투자자 대응 가이드
+    * 오늘 같은 장세에서는 **어떤 스타일의 투자**가 유리합니까? (돌파 매매 vs 눌림목 매수 vs 현금 확보)
+    * 34세 직장인 투자자에게 추천하는 '오늘의 관심 섹터' 1가지를 꼽아주세요.
     """
+    
     try:
         response = model.generate_content(prompt, stream=True)
         for chunk in response: yield chunk.text
@@ -290,8 +340,7 @@ with tab1:
     3. 💥 **거래량 상위 500위** (코스피+코스닥)
     """)
     
-    # [핵심] 데이터 수집 현황판 (디버깅용)
-    st.info(f"📊 **데이터 수집 현황** (이 숫자가 0이면 네이버 차단 상태입니다)")
+    st.info(f"📊 **데이터 수집 현황**")
     col1, col2, col3 = st.columns(3)
     col1.metric("🔥 테마 종목", f"{len(df_themes)}개")
     col2.metric("📈 상승 종목", f"{len(riser_codes)}개")
@@ -302,7 +351,6 @@ with tab1:
     if not df_themes.empty:
         for index, row in df_themes.iterrows():
             code = row['code']
-            # 교집합 검사
             if (code in riser_codes) and (code in volume_codes):
                 final_candidates.append(row.to_dict())
                 
@@ -333,7 +381,7 @@ with tab1:
                 st.session_state.messages = []
                 st.session_state.last_code = code
 
-            with st.spinner(f"🔍 {s_name} 뉴스 데이터 50건 수집 중..."):
+            with st.spinner(f"🔍 {s_name} 심층 분석을 위한 데이터 수집 중..."):
                 fund = get_stock_fundamentals(code)
                 news_1 = fetch_google_news_rss(f"{s_name} 주가", limit=25)
                 news_2 = fetch_google_news_rss(f"{s_name} 호재 특징주", limit=25)
@@ -350,26 +398,15 @@ with tab1:
             with st.expander("💬 AI 투자 전략가와 대화하기 (Click)", expanded=True):
                 if not st.session_state.messages:
                     if st.button(f"⚡ '{s_name}' 심층 분석 시작"):
-                        sys_prompt = f"""
-                        당신은 월가 출신의 퀀트 및 투자 전략가입니다.
-                        제공된 [시장 데이터(30%)]와 [뉴스 요약 데이터(70%)]를 종합 분석하십시오.
-                        
-                        [분석 목표]
-                        뉴스 요약문들에서 반복되는 키워드와 팩트를 추출하여 상승/하락의 '진짜 이유'를 찾아내고,
-                        34세 직장인 투자자에게 맞는 매매 전략을 제시하십시오.
-                        
-                        반드시 다음 포맷으로 답변하세요:
-                        1. 🚀 핵심 호재/악재 3가지 (팩트 기반)
-                        2. 🔍 뉴스 키워드 분석 (언론이 주목하는 포인트)
-                        3. 💡 실전 매매 전략 (매수/매도/관망 및 목표가)
-                        """
-                        st.session_state.messages.append({"role": "user", "content": sys_prompt})
+                        # 사용자 메시지에는 간단한 요청만 남김
+                        st.session_state.messages.append({"role": "user", "content": f"{s_name}에 대해 34세 직장인 관점에서 매수해도 될지 분석해줘."})
                         with st.chat_message("assistant"):
-                            res_txt = st.write_stream(get_gemini_response_intersection(st.session_state.messages, selected_real_name, s_name, s_theme, market_data_str, final_news_list))
+                            # 실제 AI에게는 함수에서 만든 거대한 프롬프트가 전달됨
+                            res_txt = st.write_stream(get_gemini_response_stock_deep(st.session_state.messages, selected_real_name, s_name, s_theme, market_data_str, final_news_list))
                         st.session_state.messages.append({"role": "assistant", "content": res_txt})
 
                 for msg in st.session_state.messages:
-                    if msg['role'] == 'user' and "당신은" in msg['content']: continue
+                    if msg['role'] == 'user' and "당신은" in msg['content']: continue 
                     with st.chat_message(msg['role']): st.markdown(msg['content'])
 
                 if prompt := st.chat_input(f"{s_name} 질문..."):
@@ -427,7 +464,6 @@ with tab2:
                     for n in final_market_news:
                         st.write(f"- {n['title']}: {n['summary']}")
                 
-                st.write_stream(analyze_market_summary(df_market, final_market_news, selected_real_name))
+                st.write_stream(analyze_market_macro(df_market, final_market_news, selected_real_name))
             else:
                 st.error("⚠️ 뉴스 수집 실패.")
-
