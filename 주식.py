@@ -359,13 +359,13 @@ with st.sidebar:
     if GOOG_API_KEY.startswith("AIza"):
         models = get_available_gemini_models(GOOG_API_KEY)
         
-        # [수정] 'flash'가 포함된 모델을 스마트하게 찾아서 기본값 설정
+        # [핵심 수정] 사용자가 원하는 '기본 모델' 이름 지정
+        target_model = "gemini-flash-latest"
+        
         default_index = 0
-        for i, name in enumerate(models):
-            # "flash" 라는 단어가 포함되어 있으면 그 인덱스를 저장하고 반복 종료
-            if "flash" in name.lower():
-                default_index = i
-                break
+        # 모델 목록에 목표 모델이 실제로 존재하는지 확인 후 인덱스 설정
+        if target_model in models:
+            default_index = models.index(target_model)
             
         model_name = st.selectbox("모델 선택", models, index=default_index)
         selected_real_name = model_name.split(" ")[1] if " " in model_name else model_name
@@ -557,6 +557,7 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
 
 
