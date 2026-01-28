@@ -18,7 +18,7 @@ except:
 
 # 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기", layout="wide")
-st.title("🤖 AI 주식 투자 전략가 (Final Polish Ver.)")
+st.title("🤖 AI 주식 투자 전략가 파이널")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -548,5 +548,6 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
 
