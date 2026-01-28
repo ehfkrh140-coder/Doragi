@@ -6,7 +6,6 @@ import time
 import re
 import google.generativeai as genai
 import urllib.parse
-from datetime import datetime
 
 # ==========================================
 # 🔑 [필수] Gemini API 키 설정
@@ -18,7 +17,7 @@ except:
 
 # 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기", layout="wide")
-st.title("🤖 AI 주식 투자 전략가 (RSS & Safety Ver.)")
+st.title("🤖 AI 주식 투자 전략가 (Google RSS Mass Analysis Ver.)")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -34,25 +33,21 @@ def get_available_gemini_models(api_key):
         return [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
     except: return ["gemini-1.5-flash"]
 
-# --- [유틸: 요청 헤더] ---
-def get_headers():
-    return {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-
-# --- [핵심 1] 구글 뉴스 RSS 수집기 (네이버 차단 우회용) ---
-def get_google_news_rss(query, limit=20):
+# --- [핵심] Google News RSS 수집기 (본문 대체용 요약 데이터 확보) ---
+def fetch_google_news_rss(keyword, limit=30):
     """
-    네이버가 차단될 경우를 대비해 Google News RSS를 사용하여 뉴스를 수집합니다.
-    이 방식은 IP 차단에 매우 강하며 데이터를 안정적으로 가져옵니다.
+    구글 뉴스 RSS를 통해 제목, 링크, 날짜, 그리고 '요약(Description)'을 대량으로 수집합니다.
+    이 방식은 차단되지 않으며, 본문을 읽지 않아도 기사의 핵심 내용을 파악할 수 있습니다.
     """
     news_data = []
     try:
-        # 구글 뉴스 RSS (한국어, 한국 지역)
-        encoded_query = urllib.parse.quote(query)
-        url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ko&gl=KR&ceid=KR:ko"
+        # RSS URL 생성 (한국어, 한국 지역)
+        encoded_kw = urllib.parse.quote(keyword)
+        url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
         
-        res = requests.get(url, headers=get_headers(), timeout=5)
+        # 헤더 없이도 RSS는 잘 동작하지만, 기본 헤더 추가
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        res = requests.get(url, headers=headers, timeout=5)
         
         if res.status_code == 200:
             # XML 파싱
@@ -62,69 +57,36 @@ def get_google_news_rss(query, limit=20):
             for item in items[:limit]:
                 title = item.title.text
                 link = item.link.text
-                pub_date = item.pubDate.text if item.pubDate else ""
+                pub_date = item.pubDate.text
                 
-                # 출처 추출 (제목 뒤에 보통 ' - 언론사명' 붙음)
+                # description 태그 안에 요약문이 들어있음 (HTML 태그 포함될 수 있음)
+                raw_desc = item.description.text
+                # HTML 태그 제거 및 정제
+                clean_desc = BeautifulSoup(raw_desc, "html.parser").get_text(separator=" ", strip=True)
+                
+                # 출처 추출 (제목 뒤 ' - 매체명')
                 source = "News"
                 if "-" in title:
                     source = title.split("-")[-1].strip()
-                
+                    
                 news_data.append({
                     "source": source,
                     "title": title,
                     "link": link,
-                    "pub_date": pub_date
+                    "summary": clean_desc, # 이게 본문 역할을 대신함
+                    "date": pub_date
                 })
     except Exception as e:
         print(f"RSS Error: {e}")
         
     return news_data
 
-# --- [핵심 2] 본문 읽기 (RSS 링크 추적) ---
-def fetch_news_body(url):
-    try:
-        session = requests.Session()
-        # 구글 RSS 링크는 리다이렉트가 발생하므로 따라가야 함
-        res = session.get(url, headers=get_headers(), timeout=5, allow_redirects=True)
-        
-        res.encoding = res.apparent_encoding
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 불필요 태그 제거
-        for tag in soup(["script", "style", "iframe", "header", "footer", "button", "nav"]):
-            tag.decompose()
-            
-        body = ""
-        # 일반적인 본문 태그 패턴들
-        selectors = [
-            "article", ".article_body", "#articleBody", "#dic_area", 
-            "#newsEndContents", ".news_view", ".content_view"
-        ]
-        
-        for selector in selectors:
-            target = soup.select_one(selector)
-            if target:
-                body = target.get_text(separator=" ", strip=True)
-                break
-        
-        if not body:
-            # 본문 못 찾으면 p 태그 중 긴 것들 위주로 수집
-            paragraphs = soup.find_all('p')
-            body = " ".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 50])
-
-        if len(body) < 100: return None
-        return body[:1500] + "..."
-    except: return None
-
-# --- [데이터 수집 함수들 (네이버 금융 테이블 등)] ---
-# 테마, 시총 등은 HTML 구조가 단순하여 아직 차단되지 않았을 가능성이 높으므로 유지
-# 만약 이것도 차단되면 RSS 데이터만으로 분석해야 함.
-
+# --- [데이터 수집 함수들 (네이버 금융 테이블)] ---
 @st.cache_data
 def get_naver_themes():
     url = "https://finance.naver.com/sise/theme.naver"
     try:
-        res = requests.get(url, headers=get_headers())
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
         soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
         data = []
         for row in soup.select("#contentarea_left > table.type_1 > tr"):
@@ -136,7 +98,7 @@ def get_naver_themes():
 
 def get_theme_details(theme_link):
     try:
-        res = requests.get(theme_link, headers=get_headers())
+        res = requests.get(theme_link, headers={'User-Agent': 'Mozilla/5.0'})
         soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
         stocks = []
         for row in soup.select("table.type_5 > tbody > tr"):
@@ -171,7 +133,7 @@ def get_top_risers_info():
     market_map = {}
     for s in [0, 1]:
         try:
-            res = requests.get(f"https://finance.naver.com/sise/sise_rise.naver?sosok={s}", headers=get_headers())
+            res = requests.get(f"https://finance.naver.com/sise/sise_rise.naver?sosok={s}", headers={'User-Agent': 'Mozilla/5.0'})
             soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
             for item in soup.select("table.type_2 tr td a.tltle")[:300]: 
                 market_map[item.text.strip()] = "KOSPI" if s==0 else "KOSDAQ"
@@ -183,7 +145,7 @@ def get_volume_leaders():
     tickers = []
     for s in [0, 1]:
         try:
-            res = requests.get(f"https://finance.naver.com/sise/sise_quant_high.naver?sosok={s}", headers=get_headers())
+            res = requests.get(f"https://finance.naver.com/sise/sise_quant_high.naver?sosok={s}", headers={'User-Agent': 'Mozilla/5.0'})
             soup = BeautifulSoup(res.text, 'html.parser')
             for item in soup.select("table.type_2 tr td a.tltle")[:200]: 
                 tickers.append(item.text.strip())
@@ -193,7 +155,7 @@ def get_volume_leaders():
 def get_stock_fundamentals(code):
     try:
         url = f"https://finance.naver.com/item/main.naver?code={code}"
-        res = requests.get(url, headers=get_headers())
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
         soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
         cap_elem = soup.select_one("#_market_sum")
         if cap_elem:
@@ -209,7 +171,7 @@ def get_market_cap_top150():
     stocks = []
     for page in range(1, 4):
         try:
-            res = requests.get(f"https://finance.naver.com/sise/sise_market_sum.naver?sosok=0&page={page}", headers=get_headers())
+            res = requests.get(f"https://finance.naver.com/sise/sise_market_sum.naver?sosok=0&page={page}", headers={'User-Agent': 'Mozilla/5.0'})
             soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
             for row in soup.select("table.type_2 tbody tr"):
                 cols = row.select("td")
@@ -222,36 +184,28 @@ def get_market_cap_top150():
         except: pass
     return pd.DataFrame(stocks)
 
-# --- [AI 응답 함수 (안전장치 추가)] ---
-def get_gemini_response_safe(messages, model_name, stock_name, theme, news_list):
+# --- [AI 응답 함수] ---
+def get_gemini_response_mass_analysis(messages, model_name, stock_name, theme, market_data_str, news_data):
     genai.configure(api_key=GOOG_API_KEY)
     
-    # 시스템 프롬프트가 포함된 경우에만 뉴스 분석
     current_query = messages[-1]['content']
     search_res = ""
     
-    if "당신은" in current_query and news_list:
-        full_text_data = ""
-        read_count = 0
+    if "당신은" in current_query:
+        # 뉴스 데이터를 하나의 거대한 텍스트 덩어리로 변환 (요약문 중심)
+        combined_news_context = ""
+        for i, item in enumerate(news_data):
+            # [출처] 제목 (날짜) \n 요약문
+            combined_news_context += f"[{i+1}. {item['source']}] {item['title']} ({item['date']})\n> 요약: {item['summary']}\n\n"
+            
+        search_res = f"""
+        \n[시스템 데이터 주입]
+        1. 📊 시장 데이터 (Hard Fact):
+        {market_data_str}
         
-        with st.status(f"📰 '{stock_name}' 뉴스 분석 중 (Google RSS)...", expanded=True) as status:
-            # 상위 10개 시도
-            for item in news_list[:10]:
-                body = fetch_news_body(item['link'])
-                time.sleep(0.1)
-                
-                if body:
-                    full_text_data += f"[{item['source']}] {item['title']}\n{body}\n\n"
-                    read_count += 1
-                    st.write(f"✅ 본문 확보: {item['title']}")
-                else:
-                    # 본문 실패시 제목이라도 사용
-                    full_text_data += f"[{item['source']}] {item['title']}\n(본문 읽기 실패)\n\n"
-                    st.write(f"⚠️ 제목만 사용: {item['title']}")
-            
-            status.update(label=f"분석 준비 완료! (본문 {read_count}건)", state="complete", expanded=False)
-            
-        search_res = f"\n[뉴스 데이터]:\n{full_text_data}\n"
+        2. 📰 뉴스 대량 요약 데이터 (Soft Fact - {len(news_data)}건):
+        {combined_news_context}
+        """
     
     modified_msgs = []
     for i, msg in enumerate(messages):
@@ -265,56 +219,7 @@ def get_gemini_response_safe(messages, model_name, stock_name, theme, news_list)
         response = model.generate_content(modified_msgs, stream=True)
         for chunk in response: yield chunk.text
     except Exception as e:
-        # [핵심] API 한도 초과 등 에러 핸들링
-        error_msg = str(e)
-        if "429" in error_msg or "ResourceExhausted" in error_msg:
-            yield "⚠️ **[API 한도 초과]** Gemini API 사용량이 한도에 도달했습니다.\n\n잠시 기다리시거나(1~2분), 다른 Google API 키로 교체해주세요."
-        else:
-            yield f"⚠️ **[AI 분석 오류]** 문제가 발생했습니다: {error_msg}"
-
-def analyze_market_safe(df, news_list, model_name):
-    genai.configure(api_key=GOOG_API_KEY)
-    model = genai.GenerativeModel(f"models/{model_name}")
-    top_30 = df.head(30).to_string(index=False)
-    
-    full_text_data = ""
-    read_count = 0
-    
-    with st.status("🌍 시황 뉴스 분석 중 (Google RSS)...", expanded=True) as status:
-        if not news_list:
-             st.error("뉴스 목록이 없습니다.")
-        
-        for item in news_list[:10]:
-            body = fetch_news_body(item['link'])
-            time.sleep(0.1)
-            if body:
-                full_text_data += f"[뉴스] {item['title']}\n{body}\n\n"
-                read_count += 1
-                st.write(f"✅ 본문 확보: {item['title']}")
-            else:
-                 full_text_data += f"[뉴스] {item['title']}\n(본문 없음)\n\n"
-                 st.write(f"⚠️ 제목만 사용: {item['title']}")
-                 
-        status.update(label=f"분석 준비 완료! (데이터 {len(news_list)}건)", state="complete", expanded=False)
-    
-    prompt = f"""
-    당신은 수석 애널리스트입니다. 아래 데이터를 바탕으로 시황을 브리핑하세요.
-    [시총 상위 30위]: {top_30}
-    [뉴스 데이터]: {full_text_data}
-    
-    1. 거시 경제(금리, 환율) 및 주요 이슈 분석.
-    2. 시총 상위주와 뉴스를 연결한 섹터 분석.
-    3. 34세 직장인 투자자를 위한 전략.
-    """
-    
-    try:
-        response = model.generate_content(prompt, stream=True)
-        for chunk in response: yield chunk.text
-    except Exception as e:
-        if "429" in error_msg or "ResourceExhausted" in error_msg:
-            yield "⚠️ **[API 한도 초과]** Gemini API 사용량이 한도에 도달했습니다.\n\n잠시 기다리시거나(1~2분), 다른 Google API 키로 교체해주세요."
-        else:
-            yield f"⚠️ **[AI 분석 오류]** 문제가 발생했습니다: {str(e)}"
+        yield f"⚠️ API 오류: {str(e)}\n\n(API 키 한도가 초과되었거나 네트워크 문제입니다.)"
 
 # ==========================================
 # 🖥️ 메인 실행
@@ -381,41 +286,44 @@ with tab1:
                 st.session_state.messages = []
                 st.session_state.last_code = code
 
-            # [핵심] Google News RSS로 뉴스 수집 (네이버 차단 회피)
-            with st.spinner(f"🔍 {s_name} 뉴스 수집 중 (Google RSS)..."):
+            # [RSS 수집] 종목 뉴스 + 호재 검색 (총 50개 목표)
+            with st.spinner(f"🔍 {s_name} 관련 뉴스 데이터 50건 수집 중..."):
                 fund = get_stock_fundamentals(code)
-                # 1. 종목명으로 검색
-                news_list = get_google_news_rss(f"{s_name} 주가 특징주", limit=20)
-                # 2. 호재 키워드로 추가 검색
-                news_list_2 = get_google_news_rss(f"{s_name} 호재", limit=10)
+                # Google RSS는 차단되지 않으므로 안정적
+                news_1 = fetch_google_news_rss(f"{s_name} 주가", limit=25)
+                news_2 = fetch_google_news_rss(f"{s_name} 호재 특징주", limit=25)
                 
-                # 중복 제거 및 합치기
-                all_news = news_list + news_list_2
-                unique_news = []
-                seen_links = set()
-                for n in all_news:
-                    if n['link'] not in seen_links:
-                        unique_news.append(n)
-                        seen_links.add(n['link'])
+                # 중복 제거 (링크 기준)
+                all_news = news_1 + news_2
+                unique_news = {v['link']: v for v in all_news}.values()
+                final_news_list = list(unique_news)
+                
+                # 시장 데이터 문자열 생성 (AI 주입용)
+                market_data_str = f"종목명: {s_name}\n코드: {code}\n테마: {s_theme}\n시가총액: {fund['시가총액']}\n현재가(등락): {sel_data['현재가(등락률)']}\n시장구분: {sel_data['시장구분']}"
             
             st.subheader(f"2️⃣ [{s_name}] 상세 분석")
             st.info(f"💰 시가총액: **{fund['시가총액']}** | 🏆 테마: **{s_theme}**")
             
             with st.expander("💬 AI 투자 전략가와 대화하기 (Click)", expanded=True):
                 if not st.session_state.messages:
-                    if st.button(f"⚡ '{s_name}' 심층 분석 시작"):
-                        news_ctx = "\n".join([f"- {n['title']}" for n in unique_news[:10]])
+                    if st.button(f"⚡ '{s_name}' 심층 분석 시작 (요약문 {len(final_news_list)}건 기반)"):
                         
                         sys_prompt = f"""
-                        당신은 공격적인 투자 전략가입니다. {s_name}({s_theme})을 호재 위주로 분석하세요.
-                        [참고 뉴스 헤드라인]:
-                        {news_ctx}
+                        당신은 월가 출신의 퀀트 및 투자 전략가입니다.
+                        제공된 [시장 데이터(30% 비중)]와 [뉴스 요약 데이터(70% 비중)]를 종합하여 분석하십시오.
                         
-                        반드시 '🚀 핵심 호재 3가지', '📈 테마 전망', '💡 매매 전략' 순서로 브리핑하세요.
+                        [분석 목표]
+                        뉴스 요약문들에서 반복되는 키워드와 팩트를 추출하여 상승/하락의 '진짜 이유'를 찾아내고,
+                        34세 직장인 투자자에게 맞는 매매 전략을 제시하십시오.
+                        
+                        반드시 다음 포맷으로 답변하세요:
+                        1. 🚀 핵심 호재/악재 3가지 (팩트 기반)
+                        2. 🔍 뉴스 키워드 분석 (언론이 주목하는 포인트)
+                        3. 💡 실전 매매 전략 (매수/매도/관망 및 목표가)
                         """
                         st.session_state.messages.append({"role": "user", "content": sys_prompt})
                         with st.chat_message("assistant"):
-                            res_txt = st.write_stream(get_gemini_response_safe(st.session_state.messages, selected_real_name, s_name, s_theme, unique_news))
+                            res_txt = st.write_stream(get_gemini_response_mass_analysis(st.session_state.messages, selected_real_name, s_name, s_theme, market_data_str, final_news_list))
                         st.session_state.messages.append({"role": "assistant", "content": res_txt})
 
                 for msg in st.session_state.messages:
@@ -426,20 +334,16 @@ with tab1:
                     st.session_state.messages.append({"role": "user", "content": prompt})
                     with st.chat_message("user"): st.markdown(prompt)
                     with st.chat_message("assistant"):
-                        # 일반 대화는 뉴스 없이 진행
+                        # 대화 시에는 history 전달
                         model = genai.GenerativeModel(f"models/{selected_real_name}")
-                        history = []
-                        for m in st.session_state.messages:
-                            history.append({"role": "user" if m["role"]=="user" else "model", "parts": [m["content"]]})
-                        
+                        history = [{"role": "user" if m["role"]=="user" else "model", "parts": [m["content"]]} for m in st.session_state.messages]
                         try:
                             res = model.generate_content(history, stream=True)
                             res_txt = st.write_stream(res)
                         except Exception as e:
-                            res_txt = f"⚠️ API 오류: {str(e)}"
-                            st.error(res_txt)
-                            
-                    st.session_state.messages.append({"role": "assistant", "content": res_txt})
+                            res_txt = f"⚠️ 오류: {str(e)}"
+                            st.write(res_txt)
+                        st.session_state.messages.append({"role": "assistant", "content": res_txt})
 
             col1, col2 = st.columns([1, 1])
             with col1:
@@ -450,10 +354,14 @@ with tab1:
                     cur_theme_list = df_C[df_C['테마명']==s_theme]
                     st.dataframe(cur_theme_list[['테마순위','종목명','현재가(등락률)']], hide_index=True)
             with col2:
-                st.markdown(f"##### 📰 관련 뉴스 (총 {len(unique_news)}건)")
-                if unique_news:
-                    for n in unique_news: 
-                        st.markdown(f"- [{n['title']}]({n['link']}) <span style='color:grey; font-size:0.8em'>({n['source']})</span>", unsafe_allow_html=True)
+                st.markdown(f"##### 📰 수집된 뉴스 요약 ({len(final_news_list)}건)")
+                st.caption("※ Google News RSS의 요약문(Description)을 기반으로 분석합니다.")
+                if final_news_list:
+                    for n in final_news_list:
+                        # 요약문 표시
+                        st.markdown(f"**[{n['title']}]({n['link']})**")
+                        st.caption(f"{n['summary']}...") # RSS에서 가져온 Clean Description
+                        st.divider()
                 else:
                     st.warning("뉴스를 찾을 수 없습니다.")
 
@@ -467,15 +375,31 @@ with tab2:
         st.dataframe(df_market, height=400)
         
         st.subheader("🤖 AI 실시간 시황 브리핑")
-        if st.button("📢 시황 뉴스 수집 및 분석 (Google RSS)"):
-            with st.spinner("Google News RSS에서 시황 뉴스를 수집 중입니다..."):
-                market_news = get_google_news_rss("한국 증시 시황 코스피 코스닥", limit=30)
+        if st.button("📢 시황 뉴스 수집 및 분석 (RSS)"):
+            with st.spinner("Google RSS에서 시황 뉴스 40건 수집 중..."):
+                news_1 = fetch_google_news_rss("한국 증시 시황", limit=20)
+                news_2 = fetch_google_news_rss("코스피 코스닥 특징주", limit=20)
+                
+                all_market_news = news_1 + news_2
+                unique_market_news = {v['link']: v for v in all_market_news}.values()
+                final_market_news = list(unique_market_news)
+                
+                # 시장 데이터 요약
+                top_30_str = df_market.head(30).to_string(index=False)
             
-            if market_news:
-                st.success(f"✅ 뉴스 {len(market_news)}건 수집 완료! 분석을 시작합니다.")
-                with st.expander("🔍 수집된 뉴스 목록 보기", expanded=False):
-                    for n in market_news:
-                        st.write(f"- {n['title']}")
-                st.write_stream(analyze_market_safe(df_market, market_news, selected_real_name))
+            if final_market_news:
+                st.success(f"✅ 뉴스 {len(final_market_news)}건 확보! 분석 시작.")
+                with st.expander("🔍 수집된 데이터 확인", expanded=False):
+                    for n in final_market_news:
+                        st.write(f"- {n['title']}: {n['summary']}")
+                
+                st.write_stream(get_gemini_response_mass_analysis(
+                    [{"role": "user", "content": "당신은 수석 애널리스트입니다. 시황을 분석해주세요."}], 
+                    selected_real_name, 
+                    "KOSPI/KOSDAQ", 
+                    "Market", 
+                    top_30_str, 
+                    final_market_news
+                ))
             else:
-                st.error("⚠️ 뉴스 수집에 실패했습니다.")
+                st.error("⚠️ 뉴스 수집 실패.")
