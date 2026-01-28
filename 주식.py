@@ -6,7 +6,7 @@ import time
 import re
 import google.generativeai as genai
 from duckduckgo_search import DDGS
-from urllib.parse import urlparse
+import urllib.parse
 
 # ==========================================
 # 🔑 [필수] Gemini API 키 설정
@@ -16,9 +16,9 @@ try:
 except:
     GOOG_API_KEY = "여기에_키를_넣으세요"
 
-# 1. 페이지 설정 (버전명 변경 적용)
+# 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기 (AI Ver.)", layout="wide")
-st.title("🤖 AI 주식 투자 전략가 (Final Fix Ver.)")
+st.title("🤖 AI 주식 투자 전략가 (DuckDuckGo Fix Ver.)")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -48,32 +48,40 @@ def fetch_url_content(url):
         return content[:2000] + "..." if len(content) > 2000 else content
     except: return None
 
-# --- [강력해진 검색 함수 (DuckDuckGo)] ---
+# --- [DuckDuckGo 차단 우회 검색 함수] ---
 def search_news_robust(keyword, limit=15):
+    """
+    DuckDuckGo 검색 (backend='lite' 모드 사용하여 차단 우회)
+    """
     search_context = ""
     results = []
     
-    # 1. 뉴스 탭 검색
-    try:
-        results = list(DDGS().news(keywords=keyword, region='kr-kr', safesearch='off', max_results=limit))
-    except: results = []
+    # DDGS 객체 생성
+    ddgs = DDGS()
     
-    # 2. 실패 시 일반 검색 (백업)
-    if not results:
+    # 1. 뉴스 탭 검색 시도
+    try:
+        # backend='api'가 기본값인데 이게 잘 막힘.
+        # 일반 text 검색으로 최신순 정렬을 시도하는 것이 훨씬 안정적임
+        results = list(ddgs.text(keywords=keyword, region='kr-kr', safesearch='off', backend='lite', max_results=limit))
+    except Exception as e:
+        # 에러 발생 시 잠시 대기 후 재시도
+        time.sleep(1)
         try:
-            results = list(DDGS().text(keywords=keyword, region='kr-kr', safesearch='off', max_results=limit))
-        except: pass
+             results = list(ddgs.text(keywords=keyword, region='kr-kr', backend='html', max_results=limit))
+        except: results = []
 
-    # 3. 결과 처리 (상위 5개 본문 읽기)
+    # 2. 결과 처리 (상위 3개 본문 읽기)
     fetched_count = 0
     for i, res in enumerate(results):
         if i >= limit: break
         title = res.get('title', '-')
-        link = res.get('url', res.get('href', ''))
+        link = res.get('href', res.get('url', '')) # backend마다 키값이 다를 수 있음
         snippet = res.get('body', res.get('snippet', ''))
         
         full_body = None
-        if i < 5 and link:
+        # 상위 3개는 본문 스크래핑 시도
+        if i < 3 and link:
             full_body = fetch_url_content(link)
         
         if full_body:
@@ -84,8 +92,10 @@ def search_news_robust(keyword, limit=15):
         search_context += f"[DDG-{i+1}] {title}\n{content}\n\n"
         fetched_count += 1
         
-    if not search_context: search_context = "DuckDuckGo 검색 결과 없음 (서버 차단 가능성)"
-    return search_context, len(search_context) # 데이터와 글자수 반환
+    if not search_context: 
+        search_context = "DuckDuckGo 검색 결과 없음 (네트워크 상태를 확인해주세요)"
+        
+    return search_context, fetched_count
 
 # --- [네이버 시황 뉴스 수집] ---
 def get_naver_market_news(limit=15):
@@ -192,6 +202,7 @@ def get_volume_leaders():
         except: pass
     return tickers
 
+# [핵심 수정] 시가총액 '兆' -> '조' 한글 치환
 def get_stock_fundamentals(code):
     try:
         url = f"https://finance.naver.com/item/main.naver?code={code}"
@@ -200,7 +211,10 @@ def get_stock_fundamentals(code):
         soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
         cap_elem = soup.select_one("#_market_sum")
         if cap_elem:
-            raw_cap = cap_elem.text.strip().replace('\t', '').replace('\n', '') + "억"
+            raw_cap = cap_elem.text.strip()
+            # 兆(조) 한자를 한글로 치환
+            raw_cap = raw_cap.replace('兆', '조').replace('조', '조 ')
+            raw_cap = raw_cap.replace('\t', '').replace('\n', '') + "억"
             return {"시가총액": raw_cap}
     except: pass
     return {"시가총액": "-"}
@@ -216,7 +230,6 @@ def get_latest_news(code):
         articles = soup.select(".title > a")
         if not articles: articles = soup.select("a.tit")
         
-        # [요청] 뉴스 20개 가져오기
         for a in articles[:20]:
             title = a.text.strip()
             link = a['href']
@@ -251,17 +264,19 @@ def get_gemini_response_robust(messages, model_name, use_search, stock_name, the
     current_query = messages[-1]['content']
     search_res = ""
     
-    # [핵심] 사용자가 시스템 프롬프트(분석 요청)를 보냈을 때만 검색 실행
     if use_search and "당신은" in current_query:
-        with st.spinner(f"🌐 '{stock_name}' 심층 웹 검색 중 (DuckDuckGo)..."):
-            data, char_len = search_news_robust(f"{stock_name} {theme} 호재 전망", limit=5)
+        with st.spinner(f"🌐 DuckDuckGo 검색 진행 중... ('{stock_name}')"):
+            # 여기서 DuckDuckGo가 정상 작동하는지 로그로 확인 가능
+            data, count = search_news_robust(f"{stock_name} {theme} 호재 전망", limit=5)
             
-            # [요청] 로그 표기: 실제로 가져왔는지 확인
-            st.success(f"✅ DuckDuckGo 검색 완료! (총 {char_len:,}자 수집)")
-            with st.expander("📊 AI가 수집한 웹 데이터 보기 (클릭)", expanded=False):
-                st.text(data)
-            
-            search_res = f"\n[DuckDuckGo 웹 검색 데이터]:\n{data}\n"
+            if count > 0:
+                st.success(f"✅ DuckDuckGo 검색 성공! ({count}건 수집)")
+                with st.expander("🔍 수집된 데이터 원문 보기"):
+                    st.text(data)
+            else:
+                st.error("❌ DuckDuckGo 검색 실패 (데이터 0건). 잠시 후 다시 시도해주세요.")
+                
+            search_res = f"\n[DuckDuckGo 검색 데이터]:\n{data}\n"
     
     modified_msgs = []
     for i, msg in enumerate(messages):
@@ -279,8 +294,8 @@ def analyze_market_trend_ai(df, news_data, model_name):
     top_30 = df.head(30).to_string(index=False)
     
     prompt = f"""
-    당신은 대한민국 최고의 수석 애널리스트입니다. 
-    제공된 [시총 상위주 데이터]와 [실시간 뉴스 30건(본문 포함)]을 철저히 분석하여 시장 상황을 브리핑하고, 호재를 분석해주세요.
+    당신은 수석 애널리스트입니다. 
+    제공된 [시총 상위주 데이터]와 [실시간 뉴스 30건(본문 포함)]을 철저히 분석하여 시장 상황을 브리핑하세요.
 
     [데이터 소스 1: 코스피 시총 상위 30위 흐름]
     {top_30}
@@ -291,7 +306,7 @@ def analyze_market_trend_ai(df, news_data, model_name):
     [분석 요구사항]:
     1. 뉴스의 본문 내용까지 참고하여 금리, 환율, 해외 증시 등 거시적 요인을 설명하십시오.
     2. 시총 상위주의 등락과 뉴스를 연결하여 '왜' 오르고 내리는지 인과관계를 밝히십시오.
-    3. 종합적인 시황을 요약해주십시오.
+    3. 34세 직장인 투자자를 위해 구체적인 섹터와 대응 전략을 제시하십시오.
     """
     response = model.generate_content(prompt, stream=True)
     for chunk in response: yield chunk.text
@@ -367,15 +382,15 @@ with tab1:
                 news_list = get_latest_news(code)
             
             st.subheader(f"2️⃣ [{s_name}] 상세 분석")
+            # 시가총액 표기 (한글 '조' 적용)
             st.info(f"💰 시가총액: **{fund['시가총액']}** | 🏆 테마: **{s_theme}**")
             
             with st.expander("💬 AI 투자 전략가와 대화하기 (Click)", expanded=True):
                 if not st.session_state.messages:
                     if st.button(f"⚡ '{s_name}' 심층 분석 시작"):
                         news_ctx = "\n".join([f"- {n['제목']}" for n in news_list])
-                        
                         sys_prompt = f"""
-                        당신은 세게 최고의 투자 전략가입니다. {s_name}({s_theme})을 호재 위주로 분석하세요.
+                        당신은 공격적인 투자 전략가입니다. {s_name}({s_theme})을 호재 위주로 분석하세요.
                         [네이버 뉴스 제목]: {news_ctx}
                         반드시 '🚀 핵심 호재 3가지', '📈 테마 전망', '💡 매매 전략' 순서로 브리핑하세요.
                         """
@@ -418,18 +433,20 @@ with tab2:
         
         st.subheader("🤖 AI 실시간 시황 브리핑")
         if st.button("📢 뉴스 30개(DDG+Naver) 수집 및 분석 시작"):
-            # [요청] DuckDuckGo + 본문 읽기 + 로그 표기
-            with st.spinner("1. DuckDuckGo 검색 중..."):
-                ddg_data, ddg_len = search_news_robust("금일 코스피 코스닥 시황 특징주", limit=15)
+            # 1. DuckDuckGo 15개
+            with st.spinner("1. DuckDuckGo 검색 중 (lite 모드)..."):
+                ddg_data, ddg_cnt = search_news_robust("금일 코스피 코스닥 시황 특징주", limit=15)
             
+            # 2. 네이버 시황 15개
             with st.spinner("2. 네이버 시황 뉴스 수집 중..."):
                 naver_data = get_naver_market_news(limit=15)
             
-            combined_news = f"--- [DuckDuckGo 검색] ---\n{ddg_data}\n\n--- [네이버 시황] ---\n{naver_data}"
-            total_len = len(combined_news)
+            combined_news = f"--- [DuckDuckGo] ---\n{ddg_data}\n\n--- [네이버 시황] ---\n{naver_data}"
             
-            # [요청] 로그 및 확인창
-            st.success(f"✅ 데이터 수집 완료! 총 {total_len:,}자의 시황 데이터를 확보했습니다.")
+            # 로그 출력
+            if ddg_cnt > 0: st.success(f"✅ DuckDuckGo {ddg_cnt}건 + 네이버 15건 수집 완료!")
+            else: st.warning("⚠️ DuckDuckGo 수집 실패 (네이버 데이터로 분석합니다)")
+
             with st.expander(f"🔍 AI가 참고한 뉴스 원문 보기", expanded=True):
                 st.text(combined_news)
                 
