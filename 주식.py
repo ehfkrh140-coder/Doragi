@@ -81,7 +81,7 @@ def fetch_google_news_rss(keyword, limit=30):
         print(f"RSS Error: {e}")
     return news_data
 
-# --- [데이터 수집 1: 테마 상위 50개] ---
+# --- [데이터 수집 1: 테마 상위 40개] ---
 @st.cache_data
 def get_top_50_themes_stocks():
     url = "https://finance.naver.com/sise/theme.naver"
@@ -559,6 +559,7 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
 
 
