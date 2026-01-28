@@ -358,7 +358,16 @@ with st.sidebar:
     
     if GOOG_API_KEY.startswith("AIza"):
         models = get_available_gemini_models(GOOG_API_KEY)
-        model_name = st.selectbox("모델 선택", models, index=0)
+        
+        # [수정] 기본값을 'gemini-1.5-flash'로 자동 설정하는 로직
+        default_index = 0
+        target_model = "gemini-1.5-flash"
+        
+        # 모델 목록에 해당 모델이 있으면 그 인덱스를 기본값으로 잡음
+        if target_model in models:
+            default_index = models.index(target_model)
+            
+        model_name = st.selectbox("모델 선택", models, index=default_index)
         selected_real_name = model_name.split(" ")[1] if " " in model_name else model_name
     else:
         st.error("API 키 필요")
@@ -548,6 +557,7 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
 
 
