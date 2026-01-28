@@ -371,7 +371,7 @@ with st.sidebar:
         selected_real_name = model_name.split(" ")[1] if " " in model_name else model_name
     else:
         st.error("API 키 필요")
-        selected_real_name = "gemini-flash-latest"
+        selected_real_name = "gemini-3-flash-preview"
 
 # 초기 데이터 로딩
 with st.status("🚀 3중 필터(테마/상승/거래대금) 데이터 수집 중...", expanded=True) as status:
@@ -557,6 +557,7 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
 
 
