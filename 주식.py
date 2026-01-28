@@ -7,6 +7,7 @@ import re
 import google.generativeai as genai
 import urllib.parse
 import random
+from google.api_core import retry
 
 # ==========================================
 # 🔑 [필수] Gemini API 키 설정
@@ -18,18 +19,18 @@ except:
 
 # 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기", layout="wide")
-st.title("🤖 AI 주식 투자 전략가 (V12 Sync Fix)")
+st.title("🤖 AI 주식 투자 전략가9")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "last_code" not in st.session_state:
     st.session_state.last_code = None
-# [핵심] 뉴스와 시장 데이터를 기억하는 저장소
 if "current_news_data" not in st.session_state:
     st.session_state.current_news_data = [] 
 if "current_market_fact" not in st.session_state:
     st.session_state.current_market_fact = ""
+
 
 # --- [모델 목록] ---
 @st.cache_data
@@ -39,55 +40,42 @@ def get_available_gemini_models(api_key):
         return [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
     except: return ["gemini-1.5-flash"]
 
-# --- [핵심] Google News RSS 수집기 (재시도 로직 강화) ---
+# --- [핵심] Google News RSS 수집기 ---
 def fetch_google_news_rss(keyword, limit=30):
     news_data = []
     try:
-        # 1차 시도: 정확한 키워드
         encoded_kw = urllib.parse.quote(keyword)
         url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        
         res = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(res.content, 'xml')
-        items = soup.find_all('item')
         
-        # 2차 시도: 결과가 적으면 검색어 단순화 (예: "삼성전자 주가" -> "삼성전자")
-        if len(items) < 3 and " " in keyword:
-            simple_keyword = keyword.split(" ")[0]
-            encoded_kw = urllib.parse.quote(simple_keyword)
-            url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
-            res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
             soup = BeautifulSoup(res.content, 'xml')
             items = soup.find_all('item')
-
-        for item in items[:limit]:
-            title = item.title.text
-            link = item.link.text
-            pub_date = item.pubDate.text
             
-            raw_desc = item.description.text
-            clean_desc = BeautifulSoup(raw_desc, "html.parser").get_text(separator=" ", strip=True)
-            
-            source = "News"
-            if "-" in title:
-                parts = title.rsplit("-", 1)
-                if len(parts) > 1:
-                    source = parts[1].strip()
-                    title = parts[0].strip()
+            for item in items[:limit]:
+                title = item.title.text
+                link = item.link.text
+                pub_date = item.pubDate.text
+                raw_desc = item.description.text
+                clean_desc = BeautifulSoup(raw_desc, "html.parser").get_text(separator=" ", strip=True)
                 
-            news_data.append({
-                "source": source,
-                "title": title,
-                "link": link,
-                "summary": clean_desc,
-                "date": pub_date
-            })
+                source = "News"
+                if "-" in title:
+                    parts = title.rsplit("-", 1)
+                    if len(parts) > 1:
+                        source = parts[1].strip()
+                        title = parts[0].strip()
+                    
+                news_data.append({
+                    "source": source, "title": title, "link": link,
+                    "summary": clean_desc, "date": pub_date
+                })
     except Exception as e:
         print(f"RSS Error: {e}")
     return news_data
 
-# --- [데이터 수집 1: 테마 상위 50개 및 소속 종목] ---
+# --- [데이터 수집 함수들] ---
 @st.cache_data
 def get_top_50_themes_stocks():
     url = "https://finance.naver.com/sise/theme.naver"
@@ -135,7 +123,6 @@ def get_top_50_themes_stocks():
     except: pass
     return pd.DataFrame(all_theme_stocks)
 
-# --- [데이터 수집 2: 상승률 상위] ---
 @st.cache_data
 def get_risers_codes():
     riser_codes = set()
@@ -179,7 +166,6 @@ def get_top_gainers_df(limit=150):
         except: pass
     return pd.DataFrame(kospi_gainers), pd.DataFrame(kosdaq_gainers)
 
-# --- [데이터 수집 3: 거래대금 상위] ---
 @st.cache_data
 def get_money_flow_codes():
     mf_codes = set()
@@ -200,7 +186,6 @@ def get_money_flow_codes():
             time.sleep(0.1)
     return mf_codes
 
-# --- [기타 유틸리티] ---
 def get_stock_fundamentals(code):
     try:
         url = f"https://finance.naver.com/item/main.naver?code={code}"
@@ -233,15 +218,11 @@ def get_market_cap_top150():
         except: pass
     return pd.DataFrame(stocks)
 
-# --- [AI 응답 함수 1: 개별 종목 (뉴스 자동 연동)] ---
+# --- [AI 응답 함수 1: 개별 종목 (Streaming Bug Fix)] ---
 def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, market_data_str, news_data):
     genai.configure(api_key=GOOG_API_KEY)
     
-    current_query = messages[-1]['content']
-    search_res = ""
-    
     combined_news_context = ""
-    # 뉴스 데이터가 있으면 프롬프트에 추가
     if news_data:
         for i, item in enumerate(news_data):
             combined_news_context += f"[{i+1}. {item['source']}] {item['title']} ({item['date']})\n> 요약: {item['summary']}\n\n"
@@ -258,48 +239,49 @@ def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, mark
     sys_instructions = """
     [Role]
     당신은 냉철한 판단력을 가진 세계최고 주식 애널리스트 겸 분석가 입니다.
-    제공된 [정량 데이터]와 [뉴스 데이터]를 기반으로 사용자의 질문에 답변하십시오.
+    제공된 [정량 데이터]와 [뉴스 데이터]를 기반으로 주식종목을 분석하고 이후 사용자의 질문에 답변하십시오.
     
     [Instruction]
-    - 질문이 "분석해줘" 같은 요청이면 아래 포맷으로 리포트를 작성하세요.
-    - 질문이 특정 궁금증(예: "배당 줘?")이면 그에 맞춰 뉴스나 데이터를 근거로 답변하세요.
-    - 긴말하지 말고 핵심만 명확하게 전달하세요.
+    - 긴말하지말고 바로 분석에 들어가 주세요.
     
-    [Report Format (분석 요청 시)]
+    [Report Format]
     ### 1. 🎯 AI 투자 매력도 점수 (100점 만점)
     * **점수:** OOO점
     * **한줄 평:** (상승 동력 및 리스크 요약)
     
-    ### 2. 🚀 핵심 상승 동력 (Fact Base)
-    * 뉴스에서 확인된 실체 있는 호재 3가지를 요약.
+    ### 2. 🚀 핵심 상승 동력 (Fact Base) 및 호재분석
+    * 뉴스에서 확인된 실체 있는 호재 3가지를 요약 및 분석
     
     ### 3. ⚠️ 리스크 및 수급 점검
     * 과열 여부, 대주주 매도, 테마 대장주 여부 등 판단.
     
-    ### 4. 💡 실전 매매 전략
+    ### 4. 💡 실전 매매 전략 및 세줄 요약
     * **포지션:** [적극 매수 / 눌림목 매수 / 관망 / 매도]
     * **전략:** 구체적인 진입/대응 가이드.
     """
     
-    # 마지막 유저 메시지 뒤에 데이터를 붙여서 컨텍스트 제공
     modified_msgs = []
-    
-    # 1. 기존 대화 내역 유지
     for msg in messages[:-1]:
         modified_msgs.append({"role": "user" if msg['role']=="user" else "model", "parts": [msg['content']]})
     
-    # 2. 마지막 메시지에 데이터 + 시스템 프롬프트 결합
     last_content = messages[-1]['content'] + search_res + "\n\n" + sys_instructions
     modified_msgs.append({"role": "user", "parts": [last_content]})
     
     model = genai.GenerativeModel(f"models/{model_name}")
     try:
-        response = model.generate_content(modified_msgs, stream=True)
-        for chunk in response: yield chunk.text
+        # [핵심 수정] safety_settings 추가하여 차단 방지
+        response = model.generate_content(modified_msgs, stream=True, safety_settings=safety_settings)
+        for chunk in response:
+            # [핵심 수정] 빈 껍데기 패킷(finish_reason=1, text 없음) 처리
+            try:
+                if chunk.text: # 텍스트가 있을 때만 yield
+                    yield chunk.text
+            except ValueError:
+                pass # 텍스트 없는 마지막 패킷은 조용히 무시
     except Exception as e:
-        yield f"⚠️ API 오류: {str(e)}"
+        yield f"⚠️ 응답 중 오류: {str(e)}"
 
-# --- [AI 응답 함수 2: 시황 분석] ---
+# --- [AI 응답 함수 2: 시황 분석 (Streaming Bug Fix)] ---
 def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_data, model_name):
     genai.configure(api_key=GOOG_API_KEY)
     model = genai.GenerativeModel(f"models/{model_name}")
@@ -317,9 +299,9 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
     긴말하지말고 바로 분석에 들어가 주세요.
     
     [입력 데이터 3종]
-    1. **Blue Chips (지수 방어):** 시총 상위 50위 흐름
+    1. **Blue Chips:** 시총 상위 50위 흐름
     {str_cap}
-    2. **Momentum (주도 테마):** 급등주 흐름
+    2. **Momentum:** 급등주 흐름
     [코스피 급등] {str_kospi_gain}
     [코스닥 급등] {str_kosdaq_gain}
     3. **News Flow:** 뉴스 요약 ({len(news_data)}건)
@@ -339,13 +321,18 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
     ### 3. 📈 주요 거시 요인 분석
     * 환율, 금리, 미 증시 영향, 정부 정책 등이 오늘 시장에 미친 영향.
     
-    ### 4. 💼 투자자 대응 가이드
+    ### 4. 💼 투자자 대응 가이드 및 세줄 요약
     * 오늘 같은 장세에서는 **어떤 스타일의 투자**가 유리합니까? (돌파 매매 vs 눌림목 매수 vs 현금 확보)
     """
     
     try:
-        response = model.generate_content(prompt, stream=True)
-        for chunk in response: yield chunk.text
+        response = model.generate_content(prompt, stream=True, safety_settings=safety_settings)
+        for chunk in response:
+            try:
+                if chunk.text:
+                    yield chunk.text
+            except ValueError:
+                pass
     except Exception as e:
         yield f"⚠️ 분석 중 오류: {str(e)}"
 
@@ -356,7 +343,7 @@ with st.sidebar:
     st.header("🔍 설정")
     if st.button("🔄 데이터 새로고침"):
         st.cache_data.clear()
-        st.session_state.current_news_data = [] # 뉴스 데이터도 초기화
+        st.session_state.current_news_data = [] 
         st.rerun()
     
     if GOOG_API_KEY.startswith("AIza"):
@@ -372,11 +359,8 @@ with st.status("🚀 3중 필터(테마/상승/거래대금) 데이터 수집 �
     df_themes = get_top_50_themes_stocks() 
     riser_codes = get_risers_codes()       
     mf_codes = get_money_flow_codes()
-    
-    # 시황용 데이터
     df_market_cap = get_market_cap_top150()
     df_kospi_gainers, df_kosdaq_gainers = get_top_gainers_df(limit=150)
-    
     status.update(label="✅ 데이터 준비 완료!", state="complete", expanded=False)
 
 tab1, tab2 = st.tabs(["🎯 3중 교집합 발굴", "📊 시황 분석 (Dual-Engine)"])
@@ -424,7 +408,6 @@ with tab1:
         
         st.divider()
         
-        # [핵심] 종목 선택 시 바로 뉴스 수집
         if len(event.selection.rows) > 0:
             sel_idx = event.selection.rows[0]
             sel_data = df_final.iloc[sel_idx]
@@ -433,13 +416,11 @@ with tab1:
             code = sel_data['code']
             s_theme = sel_data['테마명']
             
-            # 종목이 바뀌면 초기화 & 즉시 뉴스 수집
             if st.session_state.last_code != code:
                 st.session_state.messages = []
                 st.session_state.last_code = code
-                st.session_state.current_news_data = [] # 초기화
+                st.session_state.current_news_data = [] 
                 
-                # [자동 수집] 선택 즉시 뉴스 긁어오기
                 with st.spinner(f"⚡ {s_name} 뉴스 데이터를 실시간 수집 중입니다..."):
                     news_1 = fetch_google_news_rss(f"{s_name} 주가", limit=25)
                     news_2 = fetch_google_news_rss(f"{s_name} 특징주", limit=25)
@@ -454,12 +435,11 @@ with tab1:
             st.info(f"💰 시가총액: **{get_stock_fundamentals(code)['시가총액']}** | 🏆 테마: **{s_theme}**")
             
             with st.expander("💬 AI 투자 전략가와 대화하기 (Click)", expanded=True):
-                # 뉴스 수집 상태 표시
                 news_count = len(st.session_state.current_news_data)
                 if news_count > 0:
-                    st.success(f"✅ **뉴스 {news_count}건이 확보되었습니다.** AI가 이 정보를 바탕으로 답변합니다.")
+                    st.success(f"✅ **뉴스 {news_count}건 확보됨.**")
                 else:
-                    st.warning("⚠️ 뉴스가 수집되지 않았습니다. AI가 시장 데이터만으로 답변합니다.")
+                    st.warning("⚠️ 뉴스 없음.")
 
                 if not st.session_state.messages:
                     if st.button(f"⚡ '{s_name}' 심층 분석 리포트 생성"):
@@ -480,6 +460,13 @@ with tab1:
                     with st.chat_message(msg['role']): st.markdown(msg['content'])
 
                 if prompt := st.chat_input(f"{s_name} 질문..."):
+                    if not st.session_state.current_news_data:
+                         with st.spinner("뉴스 데이터 자동 수집 중..."):
+                            news_1 = fetch_google_news_rss(f"{s_name} 주가", limit=25)
+                            news_2 = fetch_google_news_rss(f"{s_name} 호재 특징주", limit=25)
+                            all = news_1 + news_2
+                            st.session_state.current_news_data = list({v['link']: v for v in all}.values())
+                    
                     st.session_state.messages.append({"role": "user", "content": prompt})
                     with st.chat_message("user"): st.markdown(prompt)
                     with st.chat_message("assistant"):
@@ -502,9 +489,10 @@ with tab1:
                     cur_theme_list = df_themes[df_themes['테마명']==s_theme]
                     st.dataframe(cur_theme_list[['테마내순위', '종목명','현재가(등락률)']], hide_index=True)
             with col2:
+                final_news_list = st.session_state.current_news_data
                 st.markdown(f"##### 📰 관련 뉴스 (상위 20건)")
-                if st.session_state.current_news_data:
-                    for n in st.session_state.current_news_data[:20]: 
+                if final_news_list:
+                    for n in final_news_list[:20]: 
                         st.markdown(f"- [{n['title']}]({n['link']})")
                 else:
                     st.warning("수집된 뉴스가 없습니다.")
