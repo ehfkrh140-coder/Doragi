@@ -48,29 +48,52 @@ def extract_code(link):
     if match: return match.group(1)
     return None
 
-def clean_text(text):
-    if not text: return "-"
-    return re.sub(r'[^가-힣0-9a-zA-Z.]', '', text)
-
-# --- [검색 함수] ---
-def search_news_robust(keyword):
+# --- [검색 함수 1] DuckDuckGo (Limit 적용) ---
+def search_news_robust(keyword, limit=15):
     search_context = ""
-    total_chars = 0
     try:
-        results = list(DDGS().news(keywords=keyword, region='kr-kr', max_results=5))
-        if not results:
-            results = list(DDGS().text(keywords=keyword, region='kr-kr', max_results=5))
+        # 뉴스 탭 검색
+        results = list(DDGS().news(keywords=keyword, region='kr-kr', max_results=limit))
+        # 부족하면 텍스트 검색 보충
+        if len(results) < limit:
+            text_res = list(DDGS().text(keywords=keyword, region='kr-kr', max_results=limit))
+            results.extend(text_res)
+            results = results[:limit]
+            
         for i, res in enumerate(results):
             title = res.get('title', '-')
             body = res.get('body', res.get('snippet', '-'))
-            entry = f"[{i+1}] {title}: {body}\n"
+            entry = f"[DDG-{i+1}] {title}: {body}\n"
             search_context += entry
-            total_chars += len(entry)
     except: 
-        search_context = "외부 검색 데이터 없음"
-    return search_context, total_chars
+        search_context += "DuckDuckGo 검색 데이터 없음\n"
+    return search_context
 
-# --- [데이터 수집] Tab 1용 (기존 코드 그대로) ---
+# --- [검색 함수 2] 네이버 시황 뉴스 (Limit 적용) ---
+def get_naver_market_news(limit=15):
+    news_context = ""
+    try:
+        url = "https://finance.naver.com/news/news_list.naver?mode=LSS2D&section_id=101&section_id2=258"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        res = requests.get(url, headers=headers)
+        res.encoding = 'cp949'
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        articles = soup.select("dd.articleSubject > a") + soup.select("dt.articleSubject > a")
+        summaries = soup.select("dd.articleSummary")
+        
+        count = 0
+        for art, sum_text in zip(articles, summaries):
+            if count >= limit: break
+            title = art.text.strip()
+            summary = sum_text.text.strip()[:150]
+            news_context += f"[네이버시황-{count+1}] {title} // {summary}\n"
+            count += 1
+    except Exception as e:
+        news_context += f"네이버 뉴스 수집 실패: {e}\n"
+    return news_context
+
+# --- [데이터 수집] Tab 1용 ---
 @st.cache_data
 def get_naver_themes():
     url = "https://finance.naver.com/sise/theme.naver"
@@ -111,7 +134,6 @@ def get_market_rankings():
     market_map = {}
     vol_leaders = []
     headers = {'User-Agent': 'Mozilla/5.0'}
-    # 1. 상승률 상위 (300위까지 확대)
     for s in [0, 1]:
         try:
             res = requests.get(f"https://finance.naver.com/sise/sise_rise.naver?sosok={s}", headers=headers)
@@ -119,7 +141,6 @@ def get_market_rankings():
             for item in soup.select("table.type_2 tr td a.tltle")[:300]: 
                 market_map[item.text.strip()] = "KOSPI" if s==0 else "KOSDAQ"
         except: pass
-    # 2. 거래량 상위 (200위까지 확대)
     for s in [0, 1]:
         try:
             res = requests.get(f"https://finance.naver.com/sise/sise_quant_high.naver?sosok={s}", headers=headers)
@@ -151,6 +172,17 @@ def get_latest_news(code):
         return news_list
     except: return []
 
+# (3번 탭 오류 방지를 위해 추가)
+@st.cache_data
+def get_all_theme_stocks():
+    df_themes = get_naver_themes()
+    all_stocks = []
+    for index, row in df_themes.iterrows():
+        stocks_info = get_theme_details(row['링크'])
+        for rank, stock in enumerate(stocks_info, 1):
+             all_stocks.append({"테마순위": f"{rank}위", "종목명": stock['name'], "현재가(등락률)": stock['price_str'], "테마명": row['테마명']})
+    return pd.DataFrame(all_stocks)
+
 # --- [AI 응답 함수] ---
 def get_gemini_response_robust(messages, model_name, use_search, stock_name, theme):
     genai.configure(api_key=GOOG_API_KEY)
@@ -158,8 +190,8 @@ def get_gemini_response_robust(messages, model_name, use_search, stock_name, the
     current_query = messages[-1]['content']
     search_res = ""
     if use_search:
-        q = f"{stock_name} {theme} 호재 전망" if "당신은" in current_query else f"{stock_name} {current_query}"
-        data, count = search_news_robust(q)
+        # 개별 종목 분석은 기존 5개 유지 (속도 고려)
+        data = search_news_robust(f"{stock_name} {theme} 호재 전망", limit=5)
         search_res = f"\n[검색 데이터]:\n{data}\n"
     
     modified_msgs = []
@@ -172,20 +204,36 @@ def get_gemini_response_robust(messages, model_name, use_search, stock_name, the
     response = model.generate_content(modified_msgs, stream=True)
     for chunk in response: yield chunk.text
 
-def analyze_market_trend_ai(df, search_text, model_name):
+def analyze_market_trend_ai(df, news_data, model_name):
     genai.configure(api_key=GOOG_API_KEY)
     model = genai.GenerativeModel(f"models/{model_name}")
     top_20 = df.head(20).to_string(index=False)
+    
     prompt = f"""
-    당신은 수석 애널리스트입니다. 오늘 코스피 시총 상위 150위 흐름과 뉴스를 분석해 시황을 브리핑하세요.
-    [상위 20위 데이터]: {top_20}
-    [뉴스 검색]: {search_text}
-    분석결과는 '오늘의 증시 요약', '주도 섹터', '투자 전략' 순으로 작성하세요.
+    당신은 수석 애널리스트입니다. 
+    제공된 [실시간 시황 뉴스 30건]과 [시총 상위주 흐름]을 종합하여 현재 시장 상황을 브리핑하세요.
+
+    [분석 데이터]:
+    1. 코스피 시총 상위 20위 흐름:
+    {top_20}
+    
+    2. 실시간 시황 뉴스 (DuckDuckGo 15건 + 네이버 15건):
+    {news_data}
+    
+    [작성 가이드]:
+    ## 📰 금일 증시 핵심 요약
+    - 뉴스에서 반복되는 핵심 키워드(금리, 환율, 특정 섹터 등)를 중심으로 요약하십시오.
+    
+    ## 🌍 섹터별 수급 분석
+    - '시총 상위주 흐름'과 뉴스를 연결하여 주도 섹터의 강세/약세 원인을 분석하십시오.
+    
+    ## 💡 34세 직장인 투자자를 위한 전략
+    - 현재 시장 분위기에서 매수해야 할 섹터나 리스크 관리 여부를 조언하십시오.
     """
     response = model.generate_content(prompt, stream=True)
     for chunk in response: yield chunk.text
 
-# --- [데이터 수집] Tab 2용 (신규 기능) ---
+# --- [데이터 수집] Tab 2용 ---
 @st.cache_data
 def get_market_cap_top150():
     stocks = []
@@ -210,21 +258,20 @@ def get_market_cap_top150():
 # 🖥️ 메인 화면 구성
 # ==========================================
 
-# 사이드바
 with st.sidebar:
     st.header("🔍 설정")
     if GOOG_API_KEY.startswith("AIza"):
         models = get_available_gemini_models(GOOG_API_KEY)
-        selected_real_name = st.selectbox("모델 선택", models, index=0).split(" ")[1] if " " in models[0] else models[0]
+        model_name = st.selectbox("모델 선택", models, index=0)
+        selected_real_name = model_name.split(" ")[1] if " " in model_name else model_name
     else:
         st.error("API 키 필요")
         selected_real_name = "gemini-1.5-flash"
     use_grounding = st.checkbox("🌍 심층 검색 사용", value=True)
 
-# 탭 구성 (기존 기능 + 신규 기능)
 tab1, tab2 = st.tabs(["🎯 급등주 발굴 (기존)", "📊 시황 분석 (신규)"])
 
-# --- [Tab 1] 기존 코드 로직 복원 ---
+# --- [Tab 1] 기존 코드 로직 ---
 with tab1:
     st.subheader("1️⃣ 교집합 분석 결과 (핵심 주도주)")
     try:
@@ -248,7 +295,9 @@ with tab1:
         if final_candidates:
             df_final = pd.DataFrame(final_candidates).drop_duplicates(['종목명'])
             
-            # [기존 UI 복구] 클릭 가능한 데이터프레임
+            # [수정 1] 요청하신 대로 '테마명' 기준으로 정렬 추가
+            df_final = df_final.sort_values(by="테마명")
+            
             display_cols = ['테마순위', '시장구분', '종목명', '현재가(등락률)', '테마명']
             event = st.dataframe(
                 df_final[display_cols], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row"
@@ -256,16 +305,13 @@ with tab1:
             
             st.divider()
             
-            # [기존 UI 복구] 선택 시 하단에 상세 정보 표시
             if len(event.selection.rows) > 0:
                 sel_idx = event.selection.rows[0]
                 sel_data = df_final.iloc[sel_idx]
                 s_name = sel_data['종목명']
                 code = sel_data['종목코드']
                 s_theme = sel_data['테마명']
-                price_info = sel_data['현재가(등락률)']
                 
-                # 세션 리셋
                 if st.session_state.last_code != code:
                     st.session_state.messages = []
                     st.session_state.last_code = code
@@ -277,7 +323,6 @@ with tab1:
                 st.subheader(f"2️⃣ [{s_name}] 상세 분석")
                 st.info(f"💰 시가총액: **{fund['시가총액']}** | 🏆 테마: **{s_theme}**")
                 
-                # AI 대화창 (Expander 구조 유지)
                 with st.expander("💬 AI 투자 전략가와 대화하기 (Click)", expanded=True):
                     if not st.session_state.messages:
                         if st.button(f"⚡ '{s_name}' 심층 분석 시작"):
@@ -320,7 +365,7 @@ with tab1:
         else: st.warning("현재 조건(거래량 200위 & 상승률 300위)을 동시에 만족하는 종목이 없습니다.")
     except Exception as e: st.error(f"오류: {e}")
 
-# --- [Tab 2] 시황 분석 (신규 추가) ---
+# --- [Tab 2] 시황 분석 (기능 업데이트) ---
 with tab2:
     st.header("📊 시장 전체 흐름 (시총 Top 150)")
     if st.button("데이터 가져오기", key="btn_market"):
@@ -328,7 +373,23 @@ with tab2:
     
     if "df_market" in st.session_state and st.session_state.df_market is not None:
         st.dataframe(st.session_state.df_market, height=400)
-        if st.button("📢 AI 시황 브리핑"):
-            with st.spinner("시장 분석 중..."):
-                search_data, _ = search_news_robust("오늘 주식 시황 특징주")
-                st.write_stream(analyze_market_trend_ai(st.session_state.df_market, search_data, selected_real_name))
+        
+        st.subheader("🤖 AI 실시간 시황 브리핑")
+        if st.button("📢 뉴스 30개 수집 및 분석 시작"):
+            # 1. DuckDuckGo 15개
+            with st.spinner("1. DuckDuckGo: '금일 코스피 코스닥 시황' 검색 중 (15건)..."):
+                ddg_data = search_news_robust("금일 코스피 코스닥 시황 특징주", limit=15)
+            
+            # 2. 네이버 시황 15개
+            with st.spinner("2. 네이버 금융: 실시간 시황 뉴스 수집 중 (15건)..."):
+                naver_data = get_naver_market_news(limit=15)
+            
+            # 3. 통합
+            combined_news = f"--- [DuckDuckGo 검색 결과] ---\n{ddg_data}\n\n--- [네이버 실시간 시황] ---\n{naver_data}"
+            
+            with st.expander(f"🔍 AI가 읽은 뉴스 원문 보기 (총 30건)", expanded=True):
+                st.text(combined_news)
+                
+            # 4. 분석
+            with st.spinner("3. AI 수석 애널리스트가 브리핑을 작성 중입니다..."):
+                st.write_stream(analyze_market_trend_ai(st.session_state.df_market, combined_news, selected_real_name))
