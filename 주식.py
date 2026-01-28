@@ -97,7 +97,7 @@ def get_top_50_themes_stocks():
                 theme_name = cols[0].text.strip()
                 link = "https://finance.naver.com" + cols[0].find('a')['href']
                 theme_links.append({"name": theme_name, "link": link})
-                if len(theme_links) >= 40: break
+                if len(theme_links) >= 30: break
         
         progress_bar = st.progress(0)
         for idx, theme in enumerate(theme_links):
@@ -391,7 +391,7 @@ with tab1:
     st.subheader("1️⃣ 3중 교집합 분석 결과 (The Intersection)")
     st.markdown("""
     **필터링 조건 (AND 조건):**
-    1. 🔥 **테마 상위 50위** 내 종목
+    1. 🔥 **테마 상위 30위** 내 종목
     2. 📈 **상승률 상위 500위** (코스피+코스닥)
     3. 💰 **거래대금 상위 500위** (코스피+코스닥)
     """)
@@ -559,6 +559,7 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
 
 
