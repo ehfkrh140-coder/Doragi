@@ -97,7 +97,7 @@ def get_top_50_themes_stocks():
                 theme_name = cols[0].text.strip()
                 link = "https://finance.naver.com" + cols[0].find('a')['href']
                 theme_links.append({"name": theme_name, "link": link})
-                if len(theme_links) >= 50: break
+                if len(theme_links) >= 40: break
         
         progress_bar = st.progress(0)
         for idx, theme in enumerate(theme_links):
@@ -559,6 +559,7 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
 
 
