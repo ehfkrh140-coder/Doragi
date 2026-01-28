@@ -17,7 +17,7 @@ except:
 
 # 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기", layout="wide")
-st.title("🤖 AI 주식 투자 전략가 (Google RSS Mass Analysis Ver.)")
+st.title("🤖 AI 주식 투자 전략가77 (Google RSS Mass Analysis Ver.)")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
