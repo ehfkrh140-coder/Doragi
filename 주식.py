@@ -18,7 +18,7 @@ except:
 
 # 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기", layout="wide")
-st.title("🤖 AI 주식 투자 전략가 (The Intersection Ver.)")
+st.title("🤖 AI 주식 투자 전략가 (Data Verification Ver.)")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -74,7 +74,7 @@ def fetch_google_news_rss(keyword, limit=30):
 @st.cache_data
 def get_top_50_themes_stocks():
     url = "https://finance.naver.com/sise/theme.naver"
-    all_theme_stocks = [] # 여기에 {종목코드, 테마명...} 저장
+    all_theme_stocks = [] 
     
     try:
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -105,14 +105,13 @@ def get_top_50_themes_stocks():
                         
                         stock_name = name_tag.text.strip()
                         link_sub = name_tag['href']
-                        # 코드 추출
                         code_match = re.search(r'code=([0-9]+)', link_sub)
                         code = code_match.group(1) if code_match else ""
                         
                         price_str = cols[2].text.strip() + " (" + cols[4].text.strip().replace('\n', '').strip() + ")"
                         
                         all_theme_stocks.append({
-                            "code": code, # 매칭의 핵심 키(Key)
+                            "code": code, 
                             "종목명": stock_name,
                             "테마명": theme['name'],
                             "테마순위": f"{idx+1}위",
@@ -129,15 +128,14 @@ def get_top_50_themes_stocks():
 @st.cache_data
 def get_risers_codes():
     riser_codes = set()
-    for s in [0, 1]: # 코스피, 코스닥
+    for s in [0, 1]: 
         try:
             res = requests.get(f"https://finance.naver.com/sise/sise_rise.naver?sosok={s}", headers={'User-Agent': 'Mozilla/5.0'})
             soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
             
-            # 페이지 내 모든 상승 종목 (보통 1000개 이상 나옴) 중 상위 500개만
             count = 0
             for item in soup.select("table.type_2 tr td a.tltle"):
-                if count >= 500: break
+                if count >= 500: break # 500개 제한
                 link = item['href']
                 code_match = re.search(r'code=([0-9]+)', link)
                 if code_match:
@@ -150,14 +148,14 @@ def get_risers_codes():
 @st.cache_data
 def get_volume_codes():
     volume_codes = set()
-    for s in [0, 1]: # 코스피, 코스닥
+    for s in [0, 1]: 
         try:
             res = requests.get(f"https://finance.naver.com/sise/sise_quant_high.naver?sosok={s}", headers={'User-Agent': 'Mozilla/5.0'})
-            soup = BeautifulSoup(res.text, 'html.parser') # 거래량 페이지는 utf-8일때도 있음, 자동감지 맡김
+            soup = BeautifulSoup(res.text, 'html.parser') 
             
             count = 0
             for item in soup.select("table.type_2 tr td a.tltle"):
-                if count >= 500: break
+                if count >= 500: break # 500개 제한
                 link = item['href']
                 code_match = re.search(r'code=([0-9]+)', link)
                 if code_match:
@@ -208,7 +206,6 @@ def get_gemini_response_intersection(messages, model_name, stock_name, theme, ma
     
     if "당신은" in current_query:
         combined_news_context = ""
-        # 요약문 50개 전체 주입
         for i, item in enumerate(news_data):
             combined_news_context += f"[{i+1}. {item['source']}] {item['title']} ({item['date']})\n> 요약: {item['summary']}\n\n"
             
@@ -275,14 +272,10 @@ with st.sidebar:
 
 # 초기 데이터 로딩
 with st.status("🚀 3중 필터 데이터 수집 중... (테마/상승/거래량)", expanded=True) as status:
-    # 1. 시총 데이터
     df_market = get_market_cap_top150()
-    
-    # 2. 3대 데이터 수집
-    df_themes = get_top_50_themes_stocks() # 테마 50개 내 모든 종목
-    riser_codes = get_risers_codes()       # 상승률 Top 500 코드 집합
-    volume_codes = get_volume_codes()      # 거래량 Top 500 코드 집합
-    
+    df_themes = get_top_50_themes_stocks() 
+    riser_codes = get_risers_codes()       
+    volume_codes = get_volume_codes()      
     status.update(label="✅ 데이터 준비 완료!", state="complete", expanded=False)
 
 tab1, tab2 = st.tabs(["🎯 3중 교집합 발굴", "📊 시황 분석"])
@@ -292,26 +285,31 @@ with tab1:
     st.subheader("1️⃣ 3중 교집합 분석 결과 (The Intersection)")
     st.markdown("""
     **필터링 조건 (AND 조건):**
-    1. 🔥 **테마 상위 50위** 내 포함된 종목
-    2. 📈 **상승률 상위 500위** (코스피/코스닥)
-    3. 💥 **거래량 상위 500위** (코스피/코스닥)
+    1. 🔥 **테마 상위 50위** 내 종목
+    2. 📈 **상승률 상위 500위** (코스피+코스닥)
+    3. 💥 **거래량 상위 500위** (코스피+코스닥)
     """)
+    
+    # [핵심] 데이터 수집 현황판 (디버깅용)
+    st.info(f"📊 **데이터 수집 현황** (이 숫자가 0이면 네이버 차단 상태입니다)")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("🔥 테마 종목", f"{len(df_themes)}개")
+    col2.metric("📈 상승 종목", f"{len(riser_codes)}개")
+    col3.metric("💥 거래량 종목", f"{len(volume_codes)}개")
     
     final_candidates = []
     
     if not df_themes.empty:
         for index, row in df_themes.iterrows():
             code = row['code']
-            # [핵심] 교집합 검사 (Set Intersection)
+            # 교집합 검사
             if (code in riser_codes) and (code in volume_codes):
                 final_candidates.append(row.to_dict())
                 
     if final_candidates:
         df_final = pd.DataFrame(final_candidates)
-        # 중복 제거 (한 종목이 여러 테마에 있을 수 있음 -> 테마명은 쉼표로 합치거나 첫번째꺼 사용)
-        # 여기서는 깔끔하게 첫번째 테마 기준으로 중복 제거
         df_final = df_final.drop_duplicates(['code'])
-        df_final = df_final.sort_values(by="테마순위") # 테마 쎈 순서대로
+        df_final = df_final.sort_values(by="테마순위")
         
         event = st.dataframe(
             df_final[['테마순위', '종목명', '현재가(등락률)', '테마명']], 
@@ -328,17 +326,15 @@ with tab1:
             sel_data = df_final.iloc[sel_idx]
             
             s_name = sel_data['종목명']
-            code = sel_data['code'] # 저장해둔 코드로 정확하게
+            code = sel_data['code']
             s_theme = sel_data['테마명']
             
             if st.session_state.last_code != code:
                 st.session_state.messages = []
                 st.session_state.last_code = code
 
-            # 뉴스 수집 (50개)
             with st.spinner(f"🔍 {s_name} 뉴스 데이터 50건 수집 중..."):
                 fund = get_stock_fundamentals(code)
-                
                 news_1 = fetch_google_news_rss(f"{s_name} 주가", limit=25)
                 news_2 = fetch_google_news_rss(f"{s_name} 호재 특징주", limit=25)
                 
@@ -381,7 +377,7 @@ with tab1:
                     with st.chat_message("user"): st.markdown(prompt)
                     with st.chat_message("assistant"):
                         model = genai.GenerativeModel(f"models/{selected_real_name}")
-                        history = [{"role": "user" if m["role"]=="user" else "model", "parts": [m["content"]]} for m in st.session_state.messages]
+                        history = [{"role": m["role"], "parts": [m["content"]]} for m in st.session_state.messages]
                         try:
                             res = model.generate_content(history, stream=True)
                             res_txt = st.write_stream(res)
@@ -396,13 +392,11 @@ with tab1:
                 with t1: st.image(f"https://ssl.pstatic.net/imgfinance/chart/item/candle/day/{code}.png", use_container_width=True)
                 with t2: st.image(f"https://ssl.pstatic.net/imgfinance/chart/item/candle/week/{code}.png", use_container_width=True)
                 with t3:
-                    # 해당 테마의 다른 종목들 (교집합 통과 못한 애들도 포함해서 보여줌 - 테마 전체 비교용)
                     cur_theme_list = df_themes[df_themes['테마명']==s_theme]
                     st.dataframe(cur_theme_list[['종목명','현재가(등락률)']], hide_index=True)
             with col2:
                 st.markdown(f"##### 📰 관련 뉴스 (상위 20건)")
                 st.caption(f"※ 총 {len(final_news_list)}건의 데이터를 심층 분석했습니다.")
-                
                 if final_news_list:
                     for n in final_news_list[:20]: 
                         st.markdown(f"- [{n['title']}]({n['link']})")
