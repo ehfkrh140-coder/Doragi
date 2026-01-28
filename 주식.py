@@ -8,17 +8,23 @@ import google.generativeai as genai
 from duckduckgo_search import DDGS
 
 # ==========================================
-# 🔑 [기본 설정] API 키 및 페이지
+# 🔑 기본 설정
 # ==========================================
 try:
     GOOG_API_KEY = st.secrets["GOOG_API_KEY"]
 except:
-    GOOG_API_KEY = "여기에_키를_넣으세요" # 로컬 테스트용
+    GOOG_API_KEY = "여기에_키를_넣으세요"
 
 st.set_page_config(page_title="AI 주식 투자 비서", layout="wide")
-st.title("🤖 AI 주식 투자 전략가 (Market & Stock)")
+st.title("🤖 AI 주식 투자 전략가 (Pro Ver.)")
 
-# --- [유틸리티] 모델 목록 가져오기 ---
+# 세션 상태 초기화
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "last_code" not in st.session_state:
+    st.session_state.last_code = None
+
+# --- [유틸리티] ---
 @st.cache_data
 def get_available_models(api_key):
     try:
@@ -26,15 +32,12 @@ def get_available_models(api_key):
         return [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
     except: return ["gemini-1.5-flash"]
 
-# --- [검색 함수] DuckDuckGo + 네이버 뉴스 ---
 def robust_search(keyword):
     search_context = ""
     try:
-        # 뉴스 검색 시도
         results = list(DDGS().news(keywords=keyword, region='kr-kr', max_results=5))
         if not results:
             results = list(DDGS().text(keywords=keyword, region='kr-kr', max_results=5))
-        
         for i, res in enumerate(results):
             title = res.get('title', '-')
             body = res.get('body', res.get('snippet', '-'))
@@ -43,7 +46,7 @@ def robust_search(keyword):
         search_context = "외부 검색 데이터 없음 (네이버 데이터로 분석 대체)"
     return search_context
 
-# --- [데이터 수집 1] 기존: 테마, 거래량, 급등주 ---
+# --- [데이터 수집] Tab 1용 ---
 @st.cache_data
 def get_naver_themes():
     url = "https://finance.naver.com/sise/theme.naver"
@@ -59,7 +62,7 @@ def get_naver_themes():
         return pd.DataFrame(data).head(20)
     except: return pd.DataFrame()
 
-def get_theme_stocks(link):
+def get_theme_stocks_detail(link):
     try:
         res = requests.get(link, headers={'User-Agent': 'Mozilla/5.0'})
         res.encoding = 'cp949'
@@ -69,137 +72,91 @@ def get_theme_stocks(link):
             cols = row.select("td")
             if len(cols) > 4:
                 name = cols[0].text.strip()
-                code = re.search(r'code=([0-9]+)', cols[0].find('a')['href']).group(1)
+                code_match = re.search(r'code=([0-9]+)', cols[0].find('a')['href'])
+                code = code_match.group(1) if code_match else ""
                 price = cols[2].text.strip()
-                rate = cols[4].text.strip()
-                stocks.append({'종목명': name, '코드': code, '현재가': price, '등락률': rate})
+                rate = cols[4].text.strip().replace('\n', '').strip()
+                stocks.append({'종목명': name, '종목코드': code, '현재가(등락률)': f"{price} ({rate})", '링크': link})
         return stocks
     except: return []
 
 @st.cache_data
 def get_market_rankings():
-    # 거래량 상위 & 상승률 상위 가져오기 (범위 확대: 200위/300위)
+    # 필터 범위: 거래량 200위, 상승률 300위
     vol_stocks, rise_stocks = set(), set()
     headers = {'User-Agent': 'Mozilla/5.0'}
-    
-    # 1. 거래량 상위 (코스피/코스닥)
     for s in [0, 1]:
         try:
-            url = f"https://finance.naver.com/sise/sise_quant_high.naver?sosok={s}"
-            res = requests.get(url, headers=headers)
+            res = requests.get(f"https://finance.naver.com/sise/sise_quant_high.naver?sosok={s}", headers=headers)
             soup = BeautifulSoup(res.text, 'html.parser')
-            for item in soup.select("table.type_2 tr td a.tltle")[:200]: # 200위까지
-                vol_stocks.add(item.text.strip())
+            for item in soup.select("table.type_2 tr td a.tltle")[:200]: vol_stocks.add(item.text.strip())
         except: pass
-        
-    # 2. 상승률 상위
-    for s in [0, 1]:
         try:
-            url = f"https://finance.naver.com/sise/sise_rise.naver?sosok={s}"
-            res = requests.get(url, headers=headers) # 인코딩 이슈 자동 처리
+            res = requests.get(f"https://finance.naver.com/sise/sise_rise.naver?sosok={s}", headers=headers)
             soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
-            for item in soup.select("table.type_2 tr td a.tltle")[:300]: # 300위까지
-                rise_stocks.add(item.text.strip())
+            for item in soup.select("table.type_2 tr td a.tltle")[:300]: rise_stocks.add(item.text.strip())
         except: pass
-            
     return vol_stocks, rise_stocks
 
-# --- [데이터 수집 2] 신규: 시가총액 상위 150위 ---
+def get_latest_news_simple(code):
+    try:
+        url = f"https://finance.naver.com/item/news_news.naver?code={code}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+        res.encoding = 'cp949'
+        soup = BeautifulSoup(res.text, 'html.parser')
+        news_list = []
+        for a in soup.select(".title > a")[:10]:
+            news_list.append(f"- {a.text.strip()}")
+        return "\n".join(news_list)
+    except: return "뉴스 데이터 없음"
+
+def get_stock_fundamentals(code):
+    try:
+        url = f"https://finance.naver.com/item/main.naver?code={code}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+        res.encoding = 'cp949'
+        soup = BeautifulSoup(res.text, 'html.parser')
+        cap = soup.select_one("#_market_sum").text.strip()
+        return f"{cap}억"
+    except: return "-"
+
+# --- [데이터 수집] Tab 2용 ---
 @st.cache_data
 def get_market_cap_top150():
     stocks = []
     headers = {'User-Agent': 'Mozilla/5.0'}
-    # 코스피(0) 기준 1~3페이지 (페이지당 50개)
     for page in range(1, 4):
-        url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok=0&page={page}"
         try:
-            res = requests.get(url, headers=headers)
+            res = requests.get(f"https://finance.naver.com/sise/sise_market_sum.naver?sosok=0&page={page}", headers=headers)
             soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
-            rows = soup.select("table.type_2 tbody tr")
-            for row in rows:
+            for row in soup.select("table.type_2 tbody tr"):
                 cols = row.select("td")
-                if len(cols) < 10: continue # 빈 줄 제외
-                try:
-                    rank = cols[0].text.strip()
-                    name = cols[1].text.strip()
-                    code = re.search(r'code=([0-9]+)', cols[1].find('a')['href']).group(1)
-                    price = cols[2].text.strip()
-                    rate = cols[4].text.strip().replace("\n", "").strip()
-                    mkt_cap = cols[6].text.strip() # 시가총액
-                    
-                    # 상승/하락 기호 정리
-                    if "상승" in rate: rate = "+" + rate.replace("상승", "").strip()
-                    elif "하락" in rate: rate = "-" + rate.replace("하락", "").strip()
-                    
-                    stocks.append({
-                        "순위": rank, "종목명": name, "코드": code, 
-                        "현재가": price, "등락률": rate, "시가총액(억)": mkt_cap
-                    })
-                except: pass
+                if len(cols) < 10: continue
+                stocks.append({
+                    "순위": cols[0].text.strip(), "종목명": cols[1].text.strip(),
+                    "현재가": cols[2].text.strip(), "등락률": cols[4].text.strip().replace("\n", "").strip(),
+                    "시가총액": cols[6].text.strip()
+                })
         except: pass
     return pd.DataFrame(stocks)
 
-# --- [AI 분석 함수] 1. 개별 종목 분석 ---
-def analyze_stock_detail(name, theme, news_text, search_text, model_name):
+# --- [AI 분석 함수] ---
+def get_ai_response(messages, model_name):
     genai.configure(api_key=GOOG_API_KEY)
     model = genai.GenerativeModel(f"models/{model_name}")
-    prompt = f"""
-    당신은 20년 경력의 펀드매니저입니다. {name} 종목(테마: {theme})을 분석하세요.
-    
-    [뉴스 데이터]: {news_text}
-    [웹 검색 데이터]: {search_text}
-    
-    분석 포인트:
-    1. 🚀 핵심 호재 3가지 (상승 재료)
-    2. 📈 차트/수급 관점 (간략히)
-    3. 💡 매매 전략 (목표가/손절가 제안 포함)
-    """
-    response = model.generate_content(prompt, stream=True)
+    response = model.generate_content(messages, stream=True)
     for chunk in response: yield chunk.text
 
-# --- [AI 분석 함수] 2. 시장(시황) 분석 ---
 def analyze_market_trend(df_top, search_text, model_name):
     genai.configure(api_key=GOOG_API_KEY)
     model = genai.GenerativeModel(f"models/{model_name}")
-    
-    # 상위 종목들의 흐름을 텍스트로 요약해서 AI에게 전달
-    # (토큰 절약을 위해 상위 20개 + 등락률 큰 순서 일부만 발췌)
     top_20 = df_top.head(20).to_string(index=False)
-    
-    # 150위 내에서 가장 많이 오른 5개, 떨어진 5개 추출
-    try:
-        df_sorted = df_top.copy()
-        df_sorted['numeric_rate'] = df_sorted['등락률'].str.replace('%','').str.replace('+','').str.replace('-','-').astype(float)
-        top_gainers = df_sorted.nlargest(5, 'numeric_rate')[['종목명', '등락률']].to_string(index=False)
-        top_losers = df_sorted.nsmallest(5, 'numeric_rate')[['종목명', '등락률']].to_string(index=False)
-    except:
-        top_gainers = "데이터 추출 실패"
-        top_losers = "데이터 추출 실패"
-
     prompt = f"""
-    당신은 거시경제와 주식 시장 전체를 읽는 수석 애널리스트입니다.
-    오늘 대한민국 증시의 '시가총액 상위 150위' 흐름과 '뉴스 검색 결과'를 바탕으로 현재 시황을 브리핑하세요.
-
-    [시총 상위 20위 흐름]:
-    {top_20}
-    
-    [150위 내 급등주 Top 5]: {top_gainers}
-    [150위 내 급락주 Top 5]: {top_losers}
-    
-    [주요 시황 뉴스]:
-    {search_text}
-    
-    작성 양식:
-    ## 📊 오늘의 증시 요약 (한줄평)
-    ## 🌍 메인 주도 테마 및 섹터 분석
-    - 오늘 시장을 이끄는 업종은 무엇인가? (반도체, 바이오, 2차전지 등 시총 상위주 움직임 기반)
-    - 특징적인 수급 쏠림 현상 분석
-    ## 📰 주요 이슈 체크
-    - 검색된 뉴스를 바탕으로 시장에 영향을 준 거시 경제 이슈(금리, 환율, 해외 증시 등) 언급
-    ## 💡 투자자 대응 전략
-    - 현재 장세에서의 포트폴리오 전략 (공격적 매수 vs 관망 등)
+    당신은 수석 애널리스트입니다. 오늘 코스피 시총 상위 150위 흐름과 뉴스를 분석해 시황을 브리핑하세요.
+    [상위 20위 데이터]: {top_20}
+    [뉴스 검색]: {search_text}
+    분석결과는 '오늘의 증시 요약', '주도 섹터', '투자 전략' 순으로 작성하세요.
     """
-    
     response = model.generate_content(prompt, stream=True)
     for chunk in response: yield chunk.text
 
@@ -207,92 +164,127 @@ def analyze_market_trend(df_top, search_text, model_name):
 # 🖥️ 메인 화면 구성
 # ==========================================
 
-# 사이드바 설정
 with st.sidebar:
-    st.header("⚙️ 설정 패널")
+    st.header("⚙️ 설정")
     if GOOG_API_KEY.startswith("AIza"):
         models = get_available_models(GOOG_API_KEY)
         selected_model = st.selectbox("AI 모델", models, index=0)
     else:
-        st.error("API 키를 확인하세요!")
+        st.error("API 키 확인 필요")
         selected_model = "gemini-1.5-flash"
-    
-    st.info("데이터 범위: 거래량 상위 200위 / 상승률 상위 300위 / 시총 상위 150위")
 
-# 탭 구성
-tab1, tab2 = st.tabs(["🎯 급등주/테마 발굴", "📊 시총 상위 & 시황 분석"])
+tab1, tab2 = st.tabs(["🎯 급등주 발굴", "📊 시황 분석"])
 
-# --- [Tab 1] 기존 기능: 교집합 종목 발굴 ---
+# --- [Tab 1] 급등주 발굴 ---
 with tab1:
-    st.header("🎯 교집합 급등주 발굴")
-    if st.button("데이터 분석 시작 (Tab 1)", key="btn1"):
-        with st.spinner("시장 데이터를 샅샅이 뒤지는 중..."):
-            vol_set, rise_set = get_market_rankings()
-            df_themes = get_naver_themes()
+    st.subheader("1️⃣ 교집합 분석 결과 (테마별 정렬)")
+    
+    with st.spinner("데이터 분석 중..."):
+        vol_set, rise_set = get_market_rankings()
+        df_themes = get_naver_themes()
+        final_candidates = []
+        
+        for idx, row in df_themes.iterrows():
+            theme_stocks = get_theme_stocks_detail(row['링크'])
+            for s in theme_stocks:
+                if (s['종목명'] in vol_set) and (s['종목명'] in rise_set):
+                    s['테마명'] = row['테마명']
+                    final_candidates.append(s)
+        
+        if final_candidates:
+            df_final = pd.DataFrame(final_candidates).drop_duplicates('종목명')
+            # [요청사항] 테마별로 정렬
+            df_final = df_final.sort_values(by='테마명')
             
-            final_list = []
+            display_columns = ['테마명', '종목명', '현재가(등락률)']
+            column_config = {
+                "테마명": st.column_config.TextColumn("관련 테마", width="large"),
+                "종목명": st.column_config.TextColumn("종목명", width="medium"),
+                "현재가(등락률)": st.column_config.TextColumn("현재가 (등락률)", width="medium"),
+            }
             
-            # 테마별 종목 순회
-            progress = st.progress(0)
-            for idx, row in df_themes.iterrows():
-                t_name = row['테마명']
-                stocks = get_theme_stocks(row['링크'])
+            event = st.dataframe(
+                df_final[display_columns], 
+                use_container_width=True, 
+                hide_index=True, 
+                column_config=column_config, 
+                on_select="rerun", 
+                selection_mode="single-row"
+            )
+            
+            # [선택 시 즉각 반응]
+            if len(event.selection.rows) > 0:
+                selected_index = event.selection.rows[0]
+                selected_data = df_final.iloc[selected_index]
+                s_name = selected_data['종목명']
+                s_code = selected_data['종목코드']
+                s_theme = selected_data['테마명']
                 
-                for s in stocks:
-                    # 교집합 조건 체크
-                    if (s['종목명'] in vol_set) and (s['종목명'] in rise_set):
-                        final_list.append({
-                            "테마": t_name, "종목명": s['종목명'], 
-                            "현재가": s['현재가'], "등락률": s['등락률'], "코드": s['코드']
-                        })
-                progress.progress((idx + 1) / len(df_themes))
-            
-            if final_list:
-                df_result = pd.DataFrame(final_list).drop_duplicates('종목명')
-                st.success(f"조건 만족 종목 {len(df_result)}개 발견!")
-                st.dataframe(df_result)
+                # 세션 리셋
+                if st.session_state.last_code != s_code:
+                    st.session_state.messages = []
+                    st.session_state.last_code = s_code
                 
-                # 개별 분석 기능
-                selected_stock = st.selectbox("심층 분석할 종목 선택", df_result['종목명'].unique())
-                if st.button(f"⚡ {selected_stock} AI 분석"):
-                    row = df_result[df_result['종목명'] == selected_stock].iloc[0]
-                    with st.spinner(f"{selected_stock} 뉴스 및 정보 수집 중..."):
-                        search_q = f"{selected_stock} {row['테마']} 주가 전망"
-                        search_data = robust_search(search_q)
-                        st.write_stream(analyze_stock_detail(selected_stock, row['테마'], "네이버뉴스 데이터", search_data, selected_model))
-            else:
-                st.warning("조건을 만족하는 종목이 없습니다. (필터링 범위를 300위까지 넓혔으나 발견되지 않음)")
+                st.divider()
+                st.subheader(f"2️⃣ [{s_name}] 상세 정보")
+                
+                # 1. 정보 및 차트 (즉시 표시)
+                with st.spinner("정보 가져오는 중..."):
+                    m_cap = get_stock_fundamentals(s_code)
+                    # [요청사항] 시가총액/테마 즉시 표기
+                    st.info(f"🏷️ 테마: **{s_theme}** | 💰 시가총액: **{m_cap}**")
+                    
+                    # [요청사항] 일봉/주봉 탭
+                    c_tab1, c_tab2 = st.tabs(["📅 일봉 차트", "📆 주봉 차트"])
+                    with c_tab1: st.image(f"https://ssl.pstatic.net/imgfinance/chart/item/candle/day/{s_code}.png", use_container_width=True)
+                    with c_tab2: st.image(f"https://ssl.pstatic.net/imgfinance/chart/item/candle/week/{s_code}.png", use_container_width=True)
+                
+                # 2. AI 분석 및 질문 (하단 배치)
+                st.markdown("---")
+                st.subheader("💬 AI 투자 전략가")
+                
+                # 초기 분석 버튼 (비용 절약을 위해 버튼 유지하되, 누르면 채팅 시작)
+                if not st.session_state.messages:
+                    if st.button("⚡ 호재 중심 심층 분석 실행 (Click)", type="primary"):
+                        news_txt = get_latest_news_simple(s_code)
+                        search_res = robust_search(f"{s_name} {s_theme} 호재 전망")
+                        
+                        system_prompt = f"""
+                        당신은 공격적인 투자 전략가입니다. {s_name}({s_theme})을 호재 위주로 분석하세요.
+                        [뉴스]: {news_txt}
+                        [검색]: {search_res}
+                        반드시 '🚀 핵심 호재 3가지', '📈 테마 전망', '💡 매매 전략' 순서로 브리핑하세요.
+                        """
+                        st.session_state.messages.append({"role": "user", "content": system_prompt})
+                        with st.chat_message("assistant"):
+                            res_text = st.write_stream(get_ai_response([{"role": "user", "parts": [system_prompt]}], selected_model))
+                        st.session_state.messages.append({"role": "assistant", "content": res_text})
+                
+                # [요청사항] 대화 기능 유지
+                for msg in st.session_state.messages:
+                    if msg['role'] == 'user' and "당신은" in msg['content']: continue
+                    with st.chat_message(msg['role']): st.markdown(msg['content'])
+                
+                if prompt := st.chat_input(f"{s_name}에 대해 궁금한 점을 물어보세요..."):
+                    st.session_state.messages.append({"role": "user", "content": prompt})
+                    with st.chat_message("user"): st.markdown(prompt)
+                    with st.chat_message("assistant"):
+                        history = [{"role": m["role"], "parts": [m["content"]]} for m in st.session_state.messages]
+                        res_text = st.write_stream(get_ai_response(history, selected_model))
+                    st.session_state.messages.append({"role": "assistant", "content": res_text})
 
-# --- [Tab 2] 신규 기능: 시총 상위 & 시황 분석 ---
+        else:
+            st.warning("조건을 만족하는 종목이 없습니다.")
+
+# --- [Tab 2] 시황 분석 ---
 with tab2:
     st.header("📊 시장 전체 흐름 (시총 Top 150)")
+    if st.button("데이터 가져오기", key="btn_market"):
+        st.session_state.df_market = get_market_cap_top150()
     
-    if "df_market" not in st.session_state:
-        st.session_state.df_market = None
-
-    col_btn, col_info = st.columns([1, 3])
-    with col_btn:
-        if st.button("시황 데이터 가져오기", key="btn2"):
-            with st.spinner("코스피 시가총액 상위 150개를 가져오는 중..."):
-                st.session_state.df_market = get_market_cap_top150()
-    
-    if st.session_state.df_market is not None:
-        df = st.session_state.df_market
-        
-        # 1. 데이터 표시
-        st.dataframe(df, height=300)
-        
-        # 2. AI 시황 분석 버튼
-        st.subheader("🤖 AI 수석 애널리스트의 시장 브리핑")
-        if st.button("📢 현재 시장 상황 분석하기"):
-            with st.spinner("주요 뉴스 검색 및 수급 분석 중..."):
-                # 검색어 설정
-                search_keywords = "오늘 주식 시황 주도 테마 특징주"
-                search_data = robust_search(search_keywords)
-                
-                # 분석 실행
-                st.write_stream(analyze_market_trend(df, search_data, selected_model))
-                
-                # 검색된 뉴스 출처 표시
-                with st.expander("참고한 뉴스 데이터 보기"):
-                    st.text(search_data)
+    if "df_market" in st.session_state and st.session_state.df_market is not None:
+        st.dataframe(st.session_state.df_market, height=400)
+        if st.button("📢 AI 시황 브리핑"):
+            with st.spinner("시장 분석 중..."):
+                search_data = robust_search("오늘 주식 시황 특징주")
+                st.write_stream(analyze_market_trend(st.session_state.df_market, search_data, selected_model))
