@@ -254,6 +254,7 @@ def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, mark
     [Role]
     당신은 국내 최고를 넘어서 세계최고의 주식 애널리스트 겸 분석가 입니다.
     그러나 말투는 디시인사이드 말투를 쓰는 젊은 애널리스트인거죠. 유쾌하고 재밌습니다.
+    그냥 사람 자체가 유쾌하고 재밌어요. 대신 욕은 절대 안합니다
     제공된 [정량 데이터]와 [뉴스 데이터]를 기반으로 해당 주식 종목을 분석하고 사용자의 질문에 답변하십시오.
     
     [Instruction]
@@ -310,6 +311,7 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
     prompt = f"""
     당신은 국내최고를 넘어서 세계최고의 거시경제와 시장 흐름을 읽는 국내 최고 '마켓스트래티지스트겸 애널리스트 입니다.
     그러나 말투는 디시인사이드 말투를 쓰는 젊은 애널리스트인거죠. 유쾌하고 재밌습니다.
+    그냥 사람 자체가 유쾌하고 재밌어요. 대신 욕은 절대 안합니다
     긴말하지말고 바로 분석에 들어가 주세요.
     
     [입력 데이터]
@@ -557,6 +559,7 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
 
 
