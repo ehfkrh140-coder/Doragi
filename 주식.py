@@ -17,7 +17,7 @@ except:
 
 # 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기 (AI Ver.)", layout="wide")
-st.title("🤖 AI 주식 투자 전략가 (Session Fix Ver4.4.)")
+st.title("🤖 AI 주식 투자 전략가 (V 4.4 Stable)")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -33,110 +33,99 @@ def get_available_gemini_models(api_key):
         return [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
     except: return ["gemini-1.5-flash"]
 
-# --- [핵심 수정] 뉴스 본문 크롤링 (세션 + 스마트 디코딩) ---
+# --- [핵심 1] 뉴스 본문 크롤링 (세션 유지 + 자동 인코딩) ---
 def fetch_news_body(url):
-    """
-    세션을 사용하여 리다이렉트를 추적하고, 인코딩을 자동 보정하여 본문을 추출
-    """
     try:
-        # [핵심] 세션 객체 생성 (쿠키 유지)
+        # 세션 사용 (리다이렉트 및 쿠키 처리)
         session = requests.Session()
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Referer': 'https://finance.naver.com/'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         
-        # 1. 요청 (타임아웃 및 리다이렉트 허용)
-        res = session.get(url, headers=headers, timeout=5, allow_redirects=True)
-        final_url = res.url # 최종 도착지 주소
+        res = session.get(url, headers=headers, timeout=5)
         
-        # 2. 인코딩 결정 (주소 기반 + 콘텐츠 기반)
-        if "news.naver.com" in final_url:
-            res.encoding = 'utf-8'
-        elif "finance.naver.com" in final_url:
-            res.encoding = 'cp949'
-        else:
-            res.encoding = res.apparent_encoding # 자동 감지
-
+        # 인코딩 자동 감지 (가장 안전함)
+        res.encoding = res.apparent_encoding 
+        
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 3. 불필요한 요소 제거 (Script, Style, Link 등)
-        for tag in soup(["script", "style", "header", "footer", "a", "button", "iframe"]):
+        # 불필요한 태그 제거
+        for tag in soup(["script", "style", "header", "footer", "iframe", "button"]):
             tag.decompose()
 
-        # 4. 본문 추출 (우선순위별 시도)
         body = ""
-        
-        # Selector 1: 네이버 메인 뉴스 (가장 강력)
-        target = soup.select_one("#dic_area")
-        
-        # Selector 2: 네이버 금융 뉴스 (구형)
-        if not target: target = soup.select_one("#newsEndContents")
-        
-        # Selector 3: 연예/스포츠
-        if not target: target = soup.select_one("#articeBody")
-        
-        # Selector 4: 일반적인 본문 클래스
-        if not target: target = soup.select_one(".article_body")
-
-        if target:
-            body = target.get_text(separator=" ", strip=True)
+        # 1. 네이버 메인 뉴스
+        if soup.select_one("#dic_area"):
+            body = soup.select_one("#dic_area").get_text(strip=True)
+        # 2. 네이버 금융 뉴스
+        elif soup.select_one("#newsEndContents"):
+            body = soup.select_one("#newsEndContents").get_text(strip=True)
+        # 3. 일반 기사 본문 클래스들
+        elif soup.select_one(".article_body"):
+            body = soup.select_one(".article_body").get_text(strip=True)
+        elif soup.select_one("#articeBody"):
+            body = soup.select_one("#articeBody").get_text(strip=True)
         else:
-            # 최후의 수단: 메인 컨텐츠 영역 추정
-            main_content = soup.select_one("#content") or soup.select_one("#ct")
-            if main_content:
-                body = main_content.get_text(separator=" ", strip=True)
+            # 최후의 수단: 본문으로 추정되는 긴 텍스트
+            paragraphs = soup.find_all('p')
+            if paragraphs:
+                body = " ".join([p.get_text(strip=True) for p in paragraphs])
 
-        # 정제
-        body = re.sub(r'\s+', ' ', body) # 다중 공백 제거
-        
-        if len(body) < 50: return None # 너무 짧으면 실패 간주
-        return body[:1500] + "..." # 길이 제한
-        
-    except Exception as e:
-        return None
+        if len(body) < 50: return None
+        return body[:1500] + "..." 
+    except: return None
 
-# --- [1. 개별 종목 뉴스 리스트 (네이버 금융)] ---
+# --- [핵심 2] 개별 종목 뉴스 리스트 (단순화된 헤더) ---
 def get_stock_news_list(code, limit=20):
     news_data = []
     try:
         url = f"https://finance.naver.com/item/news_news.naver?code={code}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        # 헤더를 단순하게 변경 (과도한 정보 제거)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        
         res = requests.get(url, headers=headers)
+        # 네이버 금융 리스트 페이지는 cp949가 확실함
         soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
         
+        # 제목 선택자 (여러 패턴 시도)
         titles = soup.select(".title > a")
         if not titles: titles = soup.select("a.tit")
+        if not titles: titles = soup.select("td.title > a")
         
         for i, t in enumerate(titles):
             if i >= limit: break
             link = "https://finance.naver.com" + t['href']
-            news_data.append({"source": "종목뉴스", "title": t.get_text(strip=True), "link": link})
-    except: pass
+            title = t.get_text(strip=True)
+            if title:
+                news_data.append({"source": "종목뉴스", "title": title, "link": link})
+    except Exception as e:
+        print(f"Error fetching stock news: {e}")
     return news_data
 
-# --- [2. 키워드 검색 뉴스 리스트 (네이버 검색)] ---
+# --- [핵심 3] 키워드 검색 뉴스 리스트 ---
 def search_naver_news_keyword(keyword, limit=20):
     news_data = []
     try:
         enc_kw = urllib.parse.quote(keyword)
+        # sort=1 (최신순)
         url = f"https://search.naver.com/search.naver?where=news&query={enc_kw}&sm=tab_opt&sort=1"
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        
         res = requests.get(url, headers=headers)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        items = soup.select("div.news_wrap.api_ani_send")
+        # 뉴스 검색 결과 아이템
+        items = soup.select("a.news_tit")
+        
         for i, item in enumerate(items):
             if i >= limit: break
-            title_tag = item.select_one(".news_tit")
-            if title_tag:
-                news_data.append({"source": "검색뉴스", "title": title_tag.get_text(strip=True), "link": title_tag['href']})
+            title = item.get_text(strip=True)
+            link = item['href']
+            news_data.append({"source": "검색뉴스", "title": title, "link": link})
     except: pass
     return news_data
 
-# --- [3. 시황 뉴스 리스트] ---
+# --- [핵심 4] 시황 뉴스 리스트 ---
 def get_market_news_list(limit=30):
     news_data = []
     try:
@@ -145,16 +134,19 @@ def get_market_news_list(limit=30):
         res = requests.get(url, headers=headers)
         soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
         
+        # 시황 뉴스 선택자
         articles = soup.select("dd.articleSubject > a") + soup.select("dt.articleSubject > a")
         
         for i, art in enumerate(articles):
             if i >= limit: break
             link = "https://finance.naver.com" + art['href']
-            news_data.append({"source": "시황속보", "title": art.get_text(strip=True), "link": link})
+            title = art.get_text(strip=True)
+            if title:
+                news_data.append({"source": "시황속보", "title": title, "link": link})
     except: pass
     return news_data
 
-# --- [데이터 수집 함수들] ---
+# --- [데이터 수집 함수들 (기존 유지)] ---
 @st.cache_data
 def get_naver_themes():
     url = "https://finance.naver.com/sise/theme.naver"
@@ -227,6 +219,7 @@ def get_volume_leaders():
         except: pass
     return tickers
 
+# [수정] 한자 '조' 변환 로직
 def get_stock_fundamentals(code):
     try:
         url = f"https://finance.naver.com/item/main.naver?code={code}"
@@ -236,6 +229,7 @@ def get_stock_fundamentals(code):
         cap_elem = soup.select_one("#_market_sum")
         if cap_elem:
             raw_cap = cap_elem.text.strip()
+            # 한자 '兆' 및 '議' 등을 '조'로 치환
             raw_cap = re.sub(r'[議兆]', '조', raw_cap)
             raw_cap = raw_cap.replace('\t', '').replace('\n', '').replace('  ', ' ') + "억"
             return {"시가총액": raw_cap}
@@ -261,7 +255,7 @@ def get_market_cap_top150():
         except: pass
     return pd.DataFrame(stocks)
 
-# --- [AI 응답 함수] ---
+# --- [AI 응답 함수 (뉴스 본문 주입)] ---
 def get_gemini_response_with_news(messages, model_name, stock_name, theme, news_list_1, news_list_2):
     genai.configure(api_key=GOOG_API_KEY)
     
@@ -272,30 +266,32 @@ def get_gemini_response_with_news(messages, model_name, stock_name, theme, news_
         full_text_data = ""
         read_count = 0
         
-        with st.status(f"📰 '{stock_name}' 관련 뉴스 본문을 분석 중... (네이버 차단 우회 시도)", expanded=True) as status:
-            # 1. 종목 뉴스 (5개)
+        # 로그창 띄우기
+        with st.status(f"📰 '{stock_name}' 뉴스 분석 중... (목록: {len(news_list_1)+len(news_list_2)}개)", expanded=True) as status:
+            
+            # 1. 종목 뉴스 (상위 5개 읽기)
             for item in news_list_1[:5]:
                 body = fetch_news_body(item['link'])
-                time.sleep(0.5) # [중요] 봇 탐지 방지 딜레이
+                time.sleep(0.1) # 짧은 대기
                 if body:
                     full_text_data += f"[종목뉴스] {item['title']}\n{body}\n\n"
                     read_count += 1
                     st.write(f"✅ 읽음: {item['title']}")
                 else:
-                    st.write(f"⚠️ 접근 불가: {item['title']}")
+                    st.write(f"⚠️ 본문 없음: {item['title']}")
             
-            # 2. 호재 검색 뉴스 (5개)
+            # 2. 호재 검색 뉴스 (상위 5개 읽기)
             for item in news_list_2[:5]:
                 body = fetch_news_body(item['link'])
-                time.sleep(0.5) # [중요] 봇 탐지 방지 딜레이
+                time.sleep(0.1)
                 if body:
                     full_text_data += f"[호재검색] {item['title']}\n{body}\n\n"
                     read_count += 1
                     st.write(f"✅ 읽음: {item['title']}")
                 else:
-                    st.write(f"⚠️ 접근 불가: {item['title']}")
+                    st.write(f"⚠️ 본문 없음: {item['title']}")
             
-            status.update(label=f"분석 완료! 총 {read_count}개의 기사 본문을 확보했습니다.", state="complete", expanded=False)
+            status.update(label=f"분석 완료! 총 {read_count}개 기사의 본문을 확보했습니다.", state="complete", expanded=False)
             
         search_res = f"\n[Data 2: 뉴스 본문 텍스트 모음 ({read_count}건)]:\n{full_text_data}\n"
     
@@ -316,17 +312,17 @@ def analyze_market_trend_ai(df, news_list, model_name):
     
     full_text_data = ""
     read_count = 0
-    with st.status("🌍 시장 시황 뉴스 본문을 읽고 있습니다... (세션 유지 모드)", expanded=True) as status:
+    with st.status("🌍 시황 뉴스 30개 중 상위 10개 본문 분석...", expanded=True) as status:
         for item in news_list[:10]:
             body = fetch_news_body(item['link'])
-            time.sleep(0.5) # 딜레이
+            time.sleep(0.1)
             if body:
                 full_text_data += f"[시황뉴스] {item['title']}\n{body}\n\n"
                 read_count += 1
                 st.write(f"✅ 읽음: {item['title']}")
             else:
-                 st.write(f"⚠️ 접근 불가: {item['title']}")
-        status.update(label=f"분석 준비 완료! (본문 {read_count}건 확보)", state="complete", expanded=False)
+                 st.write(f"⚠️ 본문 없음: {item['title']}")
+        status.update(label=f"분석 완료! 총 {read_count}개의 기사를 읽었습니다.", state="complete", expanded=False)
     
     headlines = "\n".join([f"- {n['title']}" for n in news_list[10:]])
     
@@ -368,6 +364,7 @@ with st.sidebar:
         st.error("API 키 필요")
         selected_real_name = "gemini-1.5-flash"
 
+# 초기 데이터 로딩
 with st.status("🚀 시장 데이터 수집 중... (네이버 금융)", expanded=True) as status:
     df_market = get_market_cap_top150()
     market_map = get_top_risers_info()
@@ -415,7 +412,8 @@ with tab1:
                 st.session_state.messages = []
                 st.session_state.last_code = code
 
-            with st.spinner(f"🔍 {s_name} 뉴스 수집 중... (종목뉴스 + 호재검색)"):
+            # [수정] 뉴스 수집 (20개씩 총 40개)
+            with st.spinner(f"🔍 {s_name} 뉴스 수집 중..."):
                 fund = get_stock_fundamentals(code)
                 news_list_1 = get_stock_news_list(code, limit=20)
                 news_list_2 = search_naver_news_keyword(f"{s_name} 호재", limit=20)
@@ -468,7 +466,7 @@ with tab1:
                     st.dataframe(cur_theme_list[['테마순위','종목명','현재가(등락률)']], hide_index=True)
             with col2:
                 st.markdown(f"##### 📰 관련 뉴스 (총 {len(news_list_1) + len(news_list_2)}건)")
-                st.caption("※ AI가 상위 10개 기사의 본문을 정독하고 분석합니다.")
+                st.caption("※ 상위 10개 기사의 본문을 AI가 읽고 분석합니다.")
                 if news_list_1:
                     st.markdown("**[종목 뉴스]**")
                     for n in news_list_1: st.markdown(f"- [{n['title']}]({n['link']})")
