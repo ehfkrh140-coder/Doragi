@@ -7,7 +7,6 @@ import re
 import google.generativeai as genai
 import urllib.parse
 import random
-from google.api_core import retry
 
 # ==========================================
 # 🔑 [필수] Gemini API 키 설정
@@ -19,7 +18,7 @@ except:
 
 # 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기", layout="wide")
-st.title("🤖 AI 주식 투자 전략가9")
+st.title("🤖 AI 주식 투자 전략가 (Ranking Polish Ver.)")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -30,7 +29,6 @@ if "current_news_data" not in st.session_state:
     st.session_state.current_news_data = [] 
 if "current_market_fact" not in st.session_state:
     st.session_state.current_market_fact = ""
-
 
 # --- [모델 목록] ---
 @st.cache_data
@@ -75,7 +73,7 @@ def fetch_google_news_rss(keyword, limit=30):
         print(f"RSS Error: {e}")
     return news_data
 
-# --- [데이터 수집 함수들] ---
+# --- [데이터 수집 1: 테마 상위 50개 (왕관 추가)] ---
 @st.cache_data
 def get_top_50_themes_stocks():
     url = "https://finance.naver.com/sise/theme.naver"
@@ -111,9 +109,13 @@ def get_top_50_themes_stocks():
                         code = code_match.group(1) if code_match else ""
                         price_str = cols[2].text.strip() + " (" + cols[4].text.strip().replace('\n', '').strip() + ")"
                         
+                        # [UI 수정] 1등에게 왕관 수여
+                        rank_display = f"👑 {inner_rank}위" if inner_rank == 1 else f"{inner_rank}위"
+                        
                         all_theme_stocks.append({
                             "code": code, "종목명": stock_name, "테마명": theme['name'],
-                            "테마순위": f"{idx+1}위", "테마내순위": f"{inner_rank}위",
+                            "테마순위": f"{idx+1}위", "테마순위_int": idx+1, # 정렬용 숫자
+                            "테마내순위": rank_display,
                             "현재가(등락률)": price_str
                         })
                         inner_rank += 1
@@ -123,6 +125,7 @@ def get_top_50_themes_stocks():
     except: pass
     return pd.DataFrame(all_theme_stocks)
 
+# --- [데이터 수집 2: 상승률 상위] ---
 @st.cache_data
 def get_risers_codes():
     riser_codes = set()
@@ -166,6 +169,7 @@ def get_top_gainers_df(limit=150):
         except: pass
     return pd.DataFrame(kospi_gainers), pd.DataFrame(kosdaq_gainers)
 
+# --- [데이터 수집 3: 거래대금 상위] ---
 @st.cache_data
 def get_money_flow_codes():
     mf_codes = set()
@@ -218,7 +222,7 @@ def get_market_cap_top150():
         except: pass
     return pd.DataFrame(stocks)
 
-# --- [AI 응답 함수 1: 개별 종목 (Streaming Bug Fix)] ---
+# --- [AI 응답 함수 1: 개별 종목] ---
 def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, market_data_str, news_data):
     genai.configure(api_key=GOOG_API_KEY)
     
@@ -239,23 +243,24 @@ def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, mark
     sys_instructions = """
     [Role]
     당신은 냉철한 판단력을 가진 세계최고 주식 애널리스트 겸 분석가 입니다.
-    제공된 [정량 데이터]와 [뉴스 데이터]를 기반으로 주식종목을 분석하고 이후 사용자의 질문에 답변하십시오.
+    제공된 [정량 데이터]와 [뉴스 데이터]를 기반으로 사용자의 질문에 답변하십시오.
     
     [Instruction]
-    - 긴말하지말고 바로 분석에 들어가 주세요.
+    - 질문이 "분석해줘" 같은 요청이면 아래 포맷으로 리포트를 작성하세요.
+    - 긴말하지 말고 핵심만 명확하게 전달하세요.
     
     [Report Format]
     ### 1. 🎯 AI 투자 매력도 점수 (100점 만점)
     * **점수:** OOO점
     * **한줄 평:** (상승 동력 및 리스크 요약)
     
-    ### 2. 🚀 핵심 상승 동력 (Fact Base) 및 호재분석
-    * 뉴스에서 확인된 실체 있는 호재 3가지를 요약 및 분석
+    ### 2. 🚀 핵심 상승 동력 (Fact Base)
+    * 뉴스에서 확인된 실체 있는 호재 3가지를 요약.
     
     ### 3. ⚠️ 리스크 및 수급 점검
     * 과열 여부, 대주주 매도, 테마 대장주 여부 등 판단.
     
-    ### 4. 💡 실전 매매 전략 및 세줄 요약
+    ### 4. 💡 실전 매매 전략
     * **포지션:** [적극 매수 / 눌림목 매수 / 관망 / 매도]
     * **전략:** 구체적인 진입/대응 가이드.
     """
@@ -269,19 +274,15 @@ def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, mark
     
     model = genai.GenerativeModel(f"models/{model_name}")
     try:
-        # [핵심 수정] safety_settings 추가하여 차단 방지
         response = model.generate_content(modified_msgs, stream=True, safety_settings=safety_settings)
         for chunk in response:
-            # [핵심 수정] 빈 껍데기 패킷(finish_reason=1, text 없음) 처리
             try:
-                if chunk.text: # 텍스트가 있을 때만 yield
-                    yield chunk.text
-            except ValueError:
-                pass # 텍스트 없는 마지막 패킷은 조용히 무시
+                if chunk.text: yield chunk.text
+            except ValueError: pass
     except Exception as e:
         yield f"⚠️ 응답 중 오류: {str(e)}"
 
-# --- [AI 응답 함수 2: 시황 분석 (Streaming Bug Fix)] ---
+# --- [AI 응답 함수 2: 시황 분석] ---
 def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_data, model_name):
     genai.configure(api_key=GOOG_API_KEY)
     model = genai.GenerativeModel(f"models/{model_name}")
@@ -298,14 +299,10 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
     당신은 거시경제와 시장 흐름을 읽는 국내 최고 '마켓스트래티지스트겸 애널리스트 입니다.
     긴말하지말고 바로 분석에 들어가 주세요.
     
-    [입력 데이터 3종]
-    1. **Blue Chips:** 시총 상위 50위 흐름
-    {str_cap}
-    2. **Momentum:** 급등주 흐름
-    [코스피 급등] {str_kospi_gain}
-    [코스닥 급등] {str_kosdaq_gain}
-    3. **News Flow:** 뉴스 요약 ({len(news_data)}건)
-    {combined_news}
+    [입력 데이터]
+    1. Blue Chips (50위): {str_cap}
+    2. Momentum (급등주): {str_kospi_gain} / {str_kosdaq_gain}
+    3. News: {combined_news}
     
     [분석 요구사항]
     위 데이터를 종합하여 '대형주(지수)'와 '개별 급등주(테마)'의 괴리를 분석하고,
@@ -321,7 +318,7 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
     ### 3. 📈 주요 거시 요인 분석
     * 환율, 금리, 미 증시 영향, 정부 정책 등이 오늘 시장에 미친 영향.
     
-    ### 4. 💼 투자자 대응 가이드 및 세줄 요약
+    ### 4. 💼 투자자 대응 가이드
     * 오늘 같은 장세에서는 **어떤 스타일의 투자**가 유리합니까? (돌파 매매 vs 눌림목 매수 vs 현금 확보)
     """
     
@@ -329,10 +326,8 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
         response = model.generate_content(prompt, stream=True, safety_settings=safety_settings)
         for chunk in response:
             try:
-                if chunk.text:
-                    yield chunk.text
-            except ValueError:
-                pass
+                if chunk.text: yield chunk.text
+            except ValueError: pass
     except Exception as e:
         yield f"⚠️ 분석 중 오류: {str(e)}"
 
@@ -392,7 +387,8 @@ with tab1:
     if final_candidates:
         df_final = pd.DataFrame(final_candidates)
         df_final = df_final.drop_duplicates(['code'])
-        df_final = df_final.sort_values(by="테마순위")
+        # [수정] 테마 순위(숫자)로 정렬
+        df_final = df_final.sort_values(by="테마순위_int")
         
         event = st.dataframe(
             df_final[['테마순위', '테마내순위', '종목명', '현재가(등락률)', '테마명']], 
@@ -435,15 +431,28 @@ with tab1:
             st.info(f"💰 시가총액: **{get_stock_fundamentals(code)['시가총액']}** | 🏆 테마: **{s_theme}**")
             
             with st.expander("💬 AI 투자 전략가와 대화하기 (Click)", expanded=True):
+                # 뉴스 수집 상태
                 news_count = len(st.session_state.current_news_data)
                 if news_count > 0:
                     st.success(f"✅ **뉴스 {news_count}건 확보됨.**")
                 else:
                     st.warning("⚠️ 뉴스 없음.")
 
-                if not st.session_state.messages:
+                # [수정] 대화 기록 먼저 출력 (중복 방지)
+                for msg in st.session_state.messages:
+                    if msg['role'] == 'user' and "당신은" in msg['content']: continue
+                    with st.chat_message(msg['role']): st.markdown(msg['content'])
+
+                # [수정] 분석 버튼 로직 개선
+                if not st.session_state.messages: # 대화가 없을 때만 버튼 표시
                     if st.button(f"⚡ '{s_name}' 심층 분석 리포트 생성"):
-                        st.session_state.messages.append({"role": "user", "content": f"{s_name} 심층 분석해줘."})
+                        user_msg_content = f"{s_name} 심층 분석해줘."
+                        # 1. 유저 메시지 UI 출력
+                        with st.chat_message("user"): st.markdown(user_msg_content)
+                        # 2. 유저 메시지 저장
+                        st.session_state.messages.append({"role": "user", "content": user_msg_content})
+                        
+                        # 3. AI 답변 생성 및 스트리밍
                         with st.chat_message("assistant"):
                             res_txt = st.write_stream(get_gemini_response_stock_deep(
                                 st.session_state.messages, 
@@ -453,22 +462,13 @@ with tab1:
                                 st.session_state.current_market_fact, 
                                 st.session_state.current_news_data
                             ))
+                        # 4. AI 답변 저장
                         st.session_state.messages.append({"role": "assistant", "content": res_txt})
 
-                for msg in st.session_state.messages:
-                    if msg['role'] == 'user' and "당신은" in msg['content']: continue
-                    with st.chat_message(msg['role']): st.markdown(msg['content'])
-
+                # 채팅창 입력 처리
                 if prompt := st.chat_input(f"{s_name} 질문..."):
-                    if not st.session_state.current_news_data:
-                         with st.spinner("뉴스 데이터 자동 수집 중..."):
-                            news_1 = fetch_google_news_rss(f"{s_name} 주가", limit=25)
-                            news_2 = fetch_google_news_rss(f"{s_name} 호재 특징주", limit=25)
-                            all = news_1 + news_2
-                            st.session_state.current_news_data = list({v['link']: v for v in all}.values())
-                    
-                    st.session_state.messages.append({"role": "user", "content": prompt})
                     with st.chat_message("user"): st.markdown(prompt)
+                    st.session_state.messages.append({"role": "user", "content": prompt})
                     with st.chat_message("assistant"):
                         res_txt = st.write_stream(get_gemini_response_stock_deep(
                             st.session_state.messages, 
@@ -502,42 +502,33 @@ with tab1:
 # --- Tab 2 ---
 with tab2:
     st.header("📊 시장 입체 분석 (대형주 vs 주도주)")
-    
     sub_t1, sub_t2 = st.tabs(["🏢 시총 상위 150 (지수)", "🚀 급등 상위 150 (모멘텀)"])
-    
     with sub_t1:
-        if not df_market_cap.empty:
-            st.dataframe(df_market_cap, height=400, use_container_width=True)
-    
+        if not df_market_cap.empty: st.dataframe(df_market_cap, height=400, use_container_width=True)
     with sub_t2:
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("#### 코스피 급등 Top 150")
-            if not df_kospi_gainers.empty:
-                st.dataframe(df_kospi_gainers, height=400, use_container_width=True)
+            if not df_kospi_gainers.empty: st.dataframe(df_kospi_gainers, height=400, use_container_width=True)
         with c2:
             st.markdown("#### 코스닥 급등 Top 150")
-            if not df_kosdaq_gainers.empty:
-                st.dataframe(df_kosdaq_gainers, height=400, use_container_width=True)
+            if not df_kosdaq_gainers.empty: st.dataframe(df_kosdaq_gainers, height=400, use_container_width=True)
         
     st.divider()
     st.subheader("🤖 AI 실시간 시황 브리핑")
-    
     if st.button("📢 시황 뉴스 수집 및 종합 분석 (RSS)"):
         with st.spinner("시황 뉴스 수집 중..."):
             news_1 = fetch_google_news_rss("한국 증시 시황", limit=20)
             news_2 = fetch_google_news_rss("코스피 코스닥 특징주", limit=20)
-            
             all_market_news = news_1 + news_2
             unique_market_news = {v['link']: v for v in all_market_news}.values()
             final_market_news = list(unique_market_news)
             
         if final_market_news:
-            st.success(f"✅ 뉴스 {len(final_market_news)}건 확보! (시총/급등 데이터와 결합하여 분석 시작)")
+            st.success(f"✅ 뉴스 {len(final_market_news)}건 확보! (분석 시작)")
             with st.expander("🔍 수집된 뉴스 데이터 확인", expanded=False):
                 for n in final_market_news:
                     st.write(f"- {n['title']}: {n['summary']}")
-            
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
