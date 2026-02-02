@@ -47,11 +47,17 @@ def get_available_gemini_models(api_key):
     except: return ["gemini-1.5-flash"]
 
 # --- [핵심] Google News RSS 수집기 ---
+# --- [핵심 수정] Google News RSS 수집기 (기간 필터링 추가) ---
 def fetch_google_news_rss(keyword, limit=30):
     news_data = []
     try:
-        encoded_kw = urllib.parse.quote(keyword)
-        url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
+        # [수정 포인트] 검색어 뒤에 ' when:7d'를 붙여서 최근 7일 뉴스만 강제함
+        # 주식 뉴스는 너무 짧게(1d) 잡으면 주말/공휴일에 데이터가 0건이 될 수 있어 7일이 안전합니다.
+        search_query = f"{keyword} when:7d"
+        encoded_kw = urllib.parse.quote(search_query)
+        
+        # 캐시 회피용 시간 파라미터(t)는 유지
+        url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko&t={int(time.time())}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers, timeout=5)
         
@@ -559,6 +565,7 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
 
 
