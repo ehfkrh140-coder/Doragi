@@ -48,16 +48,21 @@ def get_available_gemini_models(api_key):
 
 # --- [핵심] Google News RSS 수집기 ---
 # --- [핵심 수정] Google News RSS 수집기 (기간 필터링 추가) ---
+# [상단 import 쪽에 추가 필요]
+import email.utils
+from datetime import datetime, timedelta
+
+# --- [핵심 수정] Google News RSS 수집기 (Python 날짜 '강제' 필터링) ---
 def fetch_google_news_rss(keyword, limit=30):
     news_data = []
     try:
-        # [수정 포인트] 검색어 뒤에 ' when:7d'를 붙여서 최근 7일 뉴스만 강제함
-        # 주식 뉴스는 너무 짧게(1d) 잡으면 주말/공휴일에 데이터가 0건이 될 수 있어 7일이 안전합니다.
-        search_query = f"{keyword} when:7d"
+        # 1. 검색어에 'after:YYYY-MM-DD'를 붙여서 구글에게 1차 압박을 넣습니다.
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        search_query = f"{keyword} after:{week_ago}"
         encoded_kw = urllib.parse.quote(search_query)
         
-        # 캐시 회피용 시간 파라미터(t)는 유지
-        url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko&t={int(time.time())}"
+        # 2. 최신순 정렬 파라미터 보강 (ceid, gl 등)
+        url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers, timeout=5)
         
@@ -65,13 +70,31 @@ def fetch_google_news_rss(keyword, limit=30):
             soup = BeautifulSoup(res.content, 'xml')
             items = soup.find_all('item')
             
-            for item in items[:limit]:
+            for item in items:
+                # 30개 채워지면 그만 (속도 향상)
+                if len(news_data) >= limit:
+                    break
+                    
                 title = item.title.text
                 link = item.link.text
                 pub_date = item.pubDate.text
                 raw_desc = item.description.text
                 clean_desc = BeautifulSoup(raw_desc, "html.parser").get_text(separator=" ", strip=True)
                 
+                # [핵심] 3. Python 레벨에서 날짜 확인 후 '입구 컷'
+                # RSS 날짜 형식(RFC 2822)을 파싱
+                try:
+                    item_date = email.utils.parsedate_to_datetime(pub_date)
+                    # 타임존 정보가 있는 경우 현재 시간도 타임존을 맞춰서 비교
+                    now = datetime.now(item_date.tzinfo)
+                    
+                    # 7일(days=7)보다 오래된 뉴스는 과감히 skip (continue)
+                    if item_date < (now - timedelta(days=7)):
+                        continue
+                except:
+                    # 날짜 파싱 에러나면 그냥 안전하게 포함하거나 제외 (여기선 포함)
+                    pass
+
                 source = "News"
                 if "-" in title:
                     parts = title.rsplit("-", 1)
@@ -565,6 +588,7 @@ with tab2:
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
             st.error("⚠️ 뉴스 수집 실패.")
+
 
 
 
