@@ -7,6 +7,8 @@ import re
 import google.generativeai as genai
 import urllib.parse
 import random
+import email.utils
+from datetime import datetime, timedelta
 
 # ==========================================
 # 🔑 [필수] Gemini API 키 설정
@@ -18,7 +20,7 @@ except:
 
 # 1. 페이지 설정
 st.set_page_config(page_title="주식 테마 분석기", layout="wide")
-st.title("🤖 AI 주식 투자 전략가 파이널")
+st.title("🤖 AI 주식 투자 전략가 (7-Day Context Ver.)")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -30,7 +32,7 @@ if "current_news_data" not in st.session_state:
 if "current_market_fact" not in st.session_state:
     st.session_state.current_market_fact = ""
 
-# --- [핵심 수정] 안전 필터 설정 (전역 변수로 확실하게 선언) ---
+# --- 안전 필터 해제 (전역 변수) ---
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -39,30 +41,24 @@ safety_settings = [
 ]
 
 # --- [모델 목록] ---
-@st.cache_data
+@st.cache_data(ttl=3600)
 def get_available_gemini_models(api_key):
     try:
         genai.configure(api_key=api_key)
         return [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
     except: return ["gemini-1.5-flash"]
 
-# --- [핵심] Google News RSS 수집기 ---
-# --- [핵심 수정] Google News RSS 수집기 (기간 필터링 추가) ---
-# [상단 import 쪽에 추가 필요]
-import email.utils
-from datetime import datetime, timedelta
-
-# --- [핵심 수정] Google News RSS 수집기 (Python 날짜 '강제' 필터링) ---
+# --- [핵심] Google News RSS 수집기 (7일 + 최신순 정렬) ---
 def fetch_google_news_rss(keyword, limit=30):
     news_data = []
     try:
-        # 1. 검색어에 'after:YYYY-MM-DD'를 붙여서 구글에게 1차 압박을 넣습니다.
-        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-        search_query = f"{keyword} after:{week_ago}"
+        # [수정] when:7d (최근 7일)로 기간 확장
+        search_query = f"{keyword} when:7d"
         encoded_kw = urllib.parse.quote(search_query)
         
-        # 2. 최신순 정렬 파라미터 보강 (ceid, gl 등)
-        url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
+        # [유지] scoring=n (최신순 정렬)은 필수
+        url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko&scoring=n&t={int(time.time())}"
+        
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers, timeout=5)
         
@@ -71,28 +67,20 @@ def fetch_google_news_rss(keyword, limit=30):
             items = soup.find_all('item')
             
             for item in items:
-                # 30개 채워지면 그만 (속도 향상)
-                if len(news_data) >= limit:
-                    break
-                    
                 title = item.title.text
                 link = item.link.text
                 pub_date = item.pubDate.text
                 raw_desc = item.description.text
                 clean_desc = BeautifulSoup(raw_desc, "html.parser").get_text(separator=" ", strip=True)
                 
-                # [핵심] 3. Python 레벨에서 날짜 확인 후 '입구 컷'
-                # RSS 날짜 형식(RFC 2822)을 파싱
+                # [수정] Python 레벨 필터링도 7일(days=7)로 변경
+                dt_object = None
                 try:
-                    item_date = email.utils.parsedate_to_datetime(pub_date)
-                    # 타임존 정보가 있는 경우 현재 시간도 타임존을 맞춰서 비교
-                    now = datetime.now(item_date.tzinfo)
-                    
-                    # 7일(days=7)보다 오래된 뉴스는 과감히 skip (continue)
-                    if item_date < (now - timedelta(days=7)):
+                    dt_object = email.utils.parsedate_to_datetime(pub_date)
+                    now = datetime.now(dt_object.tzinfo)
+                    if dt_object < (now - timedelta(days=7)): 
                         continue
                 except:
-                    # 날짜 파싱 에러나면 그냥 안전하게 포함하거나 제외 (여기선 포함)
                     pass
 
                 source = "News"
@@ -104,14 +92,19 @@ def fetch_google_news_rss(keyword, limit=30):
                     
                 news_data.append({
                     "source": source, "title": title, "link": link,
-                    "summary": clean_desc, "date": pub_date
+                    "summary": clean_desc, "date": pub_date, "date_obj": dt_object
                 })
+                
+            # 최신순 정렬 보장 (7일치 데이터 중에서도 최신이 위로)
+            news_data.sort(key=lambda x: x['date_obj'] if x['date_obj'] else datetime.min.replace(tzinfo=None), reverse=True)
+            news_data = news_data[:limit]
+
     except Exception as e:
         print(f"RSS Error: {e}")
     return news_data
 
-# --- [데이터 수집 1: 테마 상위 40개] ---
-@st.cache_data
+# --- [데이터 수집 함수들 (10분 갱신)] ---
+@st.cache_data(ttl=600)
 def get_top_50_themes_stocks():
     url = "https://finance.naver.com/sise/theme.naver"
     all_theme_stocks = [] 
@@ -126,9 +119,8 @@ def get_top_50_themes_stocks():
                 theme_name = cols[0].text.strip()
                 link = "https://finance.naver.com" + cols[0].find('a')['href']
                 theme_links.append({"name": theme_name, "link": link})
-                if len(theme_links) >= 30: break
+                if len(theme_links) >= 50: break
         
-        progress_bar = st.progress(0)
         for idx, theme in enumerate(theme_links):
             try:
                 res_t = requests.get(theme['link'], headers={'User-Agent': 'Mozilla/5.0'})
@@ -156,34 +148,26 @@ def get_top_50_themes_stocks():
                         })
                         inner_rank += 1
             except: pass
-            progress_bar.progress((idx + 1) / len(theme_links))
-        progress_bar.empty()
     except: pass
     return pd.DataFrame(all_theme_stocks)
 
-# --- [데이터 수집 2: 상승률 상위 (시장 정보 포함)] ---
-# [수정] 코드만 가져오는게 아니라, {코드: 시장구분} 딕셔너리로 반환
-@st.cache_data
+@st.cache_data(ttl=600)
 def get_risers_data_with_market():
-    riser_map = {} # Key: Code, Value: Market Name
-    # 0: 코스피, 1: 코스닥
+    riser_map = {}
     for s, market_name in [(0, "KOSPI"), (1, "KOSDAQ")]:
         try:
             res = requests.get(f"https://finance.naver.com/sise/sise_rise.naver?sosok={s}", headers={'User-Agent': 'Mozilla/5.0'})
             soup = BeautifulSoup(res.content.decode('cp949', 'ignore'), 'html.parser')
-            count = 0
             for item in soup.select("table.type_2 tr td a.tltle"):
-                if count >= 500: break
                 link = item['href']
                 code_match = re.search(r'code=([0-9]+)', link)
                 if code_match:
                     code = code_match.group(1)
-                    riser_map[code] = market_name # 시장 정보 저장
-                    count += 1
+                    riser_map[code] = market_name
         except: pass
     return riser_map
 
-@st.cache_data
+@st.cache_data(ttl=600)
 def get_top_gainers_df(limit=150):
     kospi_gainers = []
     kosdaq_gainers = []
@@ -208,8 +192,7 @@ def get_top_gainers_df(limit=150):
         except: pass
     return pd.DataFrame(kospi_gainers), pd.DataFrame(kosdaq_gainers)
 
-# --- [데이터 수집 3: 거래대금 상위] ---
-@st.cache_data
+@st.cache_data(ttl=600)
 def get_money_flow_codes():
     mf_codes = set()
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -243,7 +226,7 @@ def get_stock_fundamentals(code):
     except: pass
     return {"시가총액": "-"}
 
-@st.cache_data
+@st.cache_data(ttl=600)
 def get_market_cap_top150():
     stocks = []
     for page in range(1, 4):
@@ -281,29 +264,27 @@ def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, mark
     
     sys_instructions = """
     [Role]
-    당신은 국내 최고를 넘어서 세계최고의 주식 애널리스트 겸 분석가 입니다.
-    그러나 말투는 디시인사이드 말투를 쓰는 젊은 애널리스트인거죠. 유쾌하고 재밌습니다.
-    그냥 사람 자체가 유쾌하고 재밌어요. 대신 욕은 절대 안합니다
-    제공된 [정량 데이터]와 [뉴스 데이터]를 기반으로 해당 주식 종목을 분석하고 사용자의 질문에 답변하십시오.
+    당신은 냉철한 판단력을 가진 세계최고 주식 애널리스트 겸 분석가 입니다.
+    제공된 [정량 데이터]와 [뉴스 데이터]를 기반으로 사용자의 질문에 답변하십시오.
     
     [Instruction]
     - 질문이 "분석해줘" 같은 요청이면 아래 포맷으로 리포트를 작성하세요.
-    - 긴말하지 말고 바로 핵심 분석에 들어가주세요.
+    - 긴말하지 말고 핵심만 명확하게 전달하세요.
     
     [Report Format]
     ### 1. 🎯 AI 투자 매력도 점수 (100점 만점)
     * **점수:** OOO점
-    * **세줄 요약:** (상승 동력 및 호재분석, 전망, 리스크 요약 등)
+    * **한줄 평:** (상승 동력 및 리스크 요약)
     
-    ### 2. 🚀 핵심 상승 동력 (Fact Base) 및 호재분석
-    * 뉴스에서 확인된 실체 있는 호재 3가지를 분석.
+    ### 2. 🚀 핵심 상승 동력 (Fact Base)
+    * 뉴스에서 확인된 실체 있는 호재 3가지를 요약.
     
-    ### 3. ⚠️ 리스크 및 수급 점검 미래가치 판단
-    * 수급, 재무, 과열 여부, 대주주 매도, 테마 대장주 여부 등 판단.
+    ### 3. ⚠️ 리스크 및 수급 점검
+    * 과열 여부, 대주주 매도, 테마 대장주 여부 등 판단.
     
-    ### 4. 💡 매매 조언 및 세줄요약
+    ### 4. 💡 실전 매매 전략
     * **포지션:** [적극 매수 / 눌림목 매수 / 관망 / 매도]
-    * **전략:** 구체적인 진입/대응 가이드 및 세줄요약
+    * **전략:** 구체적인 진입/대응 가이드.
     """
     
     modified_msgs = []
@@ -315,7 +296,6 @@ def get_gemini_response_stock_deep(messages, model_name, stock_name, theme, mark
     
     model = genai.GenerativeModel(f"models/{model_name}")
     try:
-        # [핵심] safety_settings 전달
         response = model.generate_content(modified_msgs, stream=True, safety_settings=safety_settings)
         for chunk in response:
             try:
@@ -338,9 +318,7 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
         combined_news += f"[{item['source']}] {item['title']}\n(요약): {item['summary']}\n\n"
     
     prompt = f"""
-    당신은 국내최고를 넘어서 세계최고의 거시경제와 시장 흐름을 읽는 국내 최고 '마켓스트래티지스트겸 애널리스트 입니다.
-    그러나 말투는 디시인사이드 말투를 쓰는 젊은 애널리스트인거죠. 유쾌하고 재밌습니다.
-    그냥 사람 자체가 유쾌하고 재밌어요. 대신 욕은 절대 안합니다
+    당신은 거시경제와 시장 흐름을 읽는 국내 최고 '마켓스트래티지스트겸 애널리스트 입니다.
     긴말하지말고 바로 분석에 들어가 주세요.
     
     [입력 데이터]
@@ -350,25 +328,23 @@ def analyze_market_macro_v2(df_cap, df_gainers_kospi, df_gainers_kosdaq, news_da
     
     [분석 요구사항]
     위 데이터를 종합하여 '대형주(지수)'와 '개별 급등주(테마)'의 괴리를 분석하고,
-    오늘 시장의 '진짜 주도 흐름'을 명확히 정의해 주세요.
+    오늘 시장의 **'진짜 주도 흐름'**을 명확히 정의해 주세요.
     
     ### 1. 🌍 오늘의 시장 세줄 요약 (Market Color)
     * (예: "지수는 보합이나 2차전지와 AI 로봇 테마가 폭발하는 종목 장세")
     
     ### 2. 💰 자금 흐름 추적 (Money Flow)
-    * **대형주:** 반도체, 바이오, 금융 등 시총 상위 섹터의 수급은 어떻고 어떤 섹터가 주도하는 장세입니까?
-    * **개별주:** 급등주 리스트를 분석하고 '오늘의 강세 테마'를 파악하고 분석할 수 있습니까?
+    * **대형주:** 반도체, 바이오, 금융 등 시총 상위 섹터의 수급은 어떻습니까?
+    * **개별주:** 급등주 리스트에서 공통적으로 보이는 **'오늘의 강세 테마'**는 무엇입니까?
     
     ### 3. 📈 주요 거시 요인 분석
     * 환율, 금리, 미 증시 영향, 정부 정책 등이 오늘 시장에 미친 영향.
     
-    ### 4. 💼 투자자 대응 가이드 및 세줄 요약
-    * 오늘 같은 장세에서는 *어떤 스타일의 투자*가 유리합니까? (돌파 매매 vs 눌림목 매수 vs 현금 확보)
-    금일 시황에 대해 세줄 요약해주세요.
+    ### 4. 💼 투자자 대응 가이드
+    * 오늘 같은 장세에서는 **어떤 스타일의 투자**가 유리합니까? (돌파 매매 vs 눌림목 매수 vs 현금 확보)
     """
     
     try:
-        # [핵심] safety_settings 전달
         response = model.generate_content(prompt, stream=True, safety_settings=safety_settings)
         for chunk in response:
             try:
@@ -390,13 +366,17 @@ with st.sidebar:
     if GOOG_API_KEY.startswith("AIza"):
         models = get_available_gemini_models(GOOG_API_KEY)
         
-        # [핵심 수정] 사용자가 원하는 '기본 모델' 이름 지정
+        # [Flash 모델 기본 설정]
         target_model = "gemini-flash-latest"
-        
         default_index = 0
-        # 모델 목록에 목표 모델이 실제로 존재하는지 확인 후 인덱스 설정
         if target_model in models:
             default_index = models.index(target_model)
+        else:
+            # flash 이름이 들어간 모델 자동 선택
+            for i, m in enumerate(models):
+                if "flash" in m.lower():
+                    default_index = i
+                    break
             
         model_name = st.selectbox("모델 선택", models, index=default_index)
         selected_real_name = model_name.split(" ")[1] if " " in model_name else model_name
@@ -407,7 +387,7 @@ with st.sidebar:
 # 초기 데이터 로딩
 with st.status("🚀 3중 필터(테마/상승/거래대금) 데이터 수집 중...", expanded=True) as status:
     df_themes = get_top_50_themes_stocks() 
-    riser_data = get_risers_data_with_market() # [변경] 코드:시장구분 맵
+    riser_data = get_risers_data_with_market() 
     mf_codes = get_money_flow_codes()
     df_market_cap = get_market_cap_top150()
     df_kospi_gainers, df_kosdaq_gainers = get_top_gainers_df(limit=150)
@@ -420,7 +400,7 @@ with tab1:
     st.subheader("1️⃣ 3중 교집합 분석 결과 (The Intersection)")
     st.markdown("""
     **필터링 조건 (AND 조건):**
-    1. 🔥 **테마 상위 30위** 내 종목
+    1. 🔥 **테마 상위 50위** 내 종목
     2. 📈 **상승률 상위 500위** (코스피+코스닥)
     3. 💰 **거래대금 상위 500위** (코스피+코스닥)
     """)
@@ -436,11 +416,9 @@ with tab1:
     if not df_themes.empty:
         for index, row in df_themes.iterrows():
             code = row['code']
-            # 교집합 검사
             if (code in riser_data) and (code in mf_codes):
-                # 시장 구분 추가
                 row_data = row.to_dict()
-                row_data['시장'] = riser_data[code] # KOSPI or KOSDAQ
+                row_data['시장'] = riser_data[code] 
                 final_candidates.append(row_data)
                 
     if final_candidates:
@@ -448,8 +426,6 @@ with tab1:
         df_final = df_final.drop_duplicates(['code'])
         df_final = df_final.sort_values(by="테마순위_int")
         
-        # [UI 수정] 컬럼 순서 및 구성 변경
-        # 순서: 테마순위 -> 테마내순위 -> 시장 -> 종목명 -> 현재가 -> 테마명
         event = st.dataframe(
             df_final[['테마순위', '테마내순위', '시장', '종목명', '현재가(등락률)', '테마명']], 
             use_container_width=True, 
@@ -481,12 +457,16 @@ with tab1:
                 st.session_state.last_code = code
                 st.session_state.current_news_data = [] 
                 
-                with st.spinner(f"⚡ {s_name} 뉴스 데이터를 실시간 수집 중입니다..."):
-                    news_1 = fetch_google_news_rss(f"{s_name} 주가", limit=25)
-                    news_2 = fetch_google_news_rss(f"{s_name} 특징주", limit=25)
+                with st.spinner(f"⚡ {s_name} 실시간 속보 수집 중..."):
+                    # [핵심] 검색어 적용: {종목명} 주가 특징주 / {종목명} 속보
+                    news_1 = fetch_google_news_rss(f"{s_name} 주가 특징주", limit=20)
+                    news_2 = fetch_google_news_rss(f"{s_name} 속보", limit=20)
+                    
                     all_news = news_1 + news_2
                     unique_news = {v['link']: v for v in all_news}.values()
-                    st.session_state.current_news_data = list(unique_news)
+                    
+                    sorted_news = sorted(list(unique_news), key=lambda x: x['date_obj'] if x['date_obj'] else datetime.min.replace(tzinfo=None), reverse=True)
+                    st.session_state.current_news_data = sorted_news
                     
                     market_str = f"종목명: {s_name}\n코드: {code}\n테마: {s_theme}\n시가총액: {get_stock_fundamentals(code)['시가총액']}\n현재가(등락): {sel_data['현재가(등락률)']}"
                     st.session_state.current_market_fact = market_str
@@ -499,7 +479,7 @@ with tab1:
                 if news_count > 0:
                     st.success(f"✅ **뉴스 {news_count}건 확보됨.**")
                 else:
-                    st.warning("⚠️ 뉴스 없음.")
+                    st.warning("⚠️ 최근 7일 내 관련 뉴스가 없습니다.")
 
                 for msg in st.session_state.messages:
                     if msg['role'] == 'user' and "당신은" in msg['content']: continue
@@ -507,7 +487,7 @@ with tab1:
 
                 if not st.session_state.messages:
                     if st.button(f"⚡ '{s_name}' 심층 분석 리포트 생성"):
-                        user_msg_content = f"{s_name} 해당 주식 종목 분석해줘."
+                        user_msg_content = f"{s_name} 심층 분석해줘."
                         with st.chat_message("user"): st.markdown(user_msg_content)
                         st.session_state.messages.append({"role": "user", "content": user_msg_content})
                         
@@ -573,12 +553,15 @@ with tab2:
     st.divider()
     st.subheader("🤖 AI 실시간 시황 브리핑")
     if st.button("📢 시황 뉴스 수집 및 종합 분석 (RSS)"):
-        with st.spinner("시황 뉴스 수집 중..."):
-            news_1 = fetch_google_news_rss("한국 증시 시황", limit=20)
-            news_2 = fetch_google_news_rss("코스피 코스닥 특징주", limit=20)
+        with st.spinner("실시간 증시 속보 수집 중..."):
+            # [핵심] 시황 검색어: 국내 증시 / 한국 증시
+            news_1 = fetch_google_news_rss("국내 증시", limit=20)
+            news_2 = fetch_google_news_rss("한국 증시", limit=20)
+            
             all_market_news = news_1 + news_2
             unique_market_news = {v['link']: v for v in all_market_news}.values()
-            final_market_news = list(unique_market_news)
+            
+            final_market_news = sorted(list(unique_market_news), key=lambda x: x['date_obj'] if x['date_obj'] else datetime.min.replace(tzinfo=None), reverse=True)
             
         if final_market_news:
             st.success(f"✅ 뉴스 {len(final_market_news)}건 확보! (분석 시작)")
@@ -587,19 +570,4 @@ with tab2:
                     st.write(f"- {n['title']}: {n['summary']}")
             st.write_stream(analyze_market_macro_v2(df_market_cap, df_kospi_gainers, df_kosdaq_gainers, final_market_news, selected_real_name))
         else:
-            st.error("⚠️ 뉴스 수집 실패.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            st.error("⚠️ 최근 7일 내 시황 뉴스가 없습니다.")
